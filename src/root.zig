@@ -1,191 +1,190 @@
-//! By convention, root.zig is the root source file when making a library. If
-//! you are making an executable, the convention is to delete this file and
-//! start with main.zig instead.
+// New root.zig implementing SOLID-friendly movement and rotation engines with tests
 const std = @import("std");
 const testing = std.testing;
-const math = std.math;
 
-// Error types for quadratic equation solver
-pub const QuadraticError = error{
-    InvalidCoefficientA,  // a cannot be 0 or invalid
-    InvalidInput,         // NaN or infinity in coefficients
-    OutOfMemory,          // Memory allocation failed
+// Basic 2D vector type used for position and velocity
+pub const Vec2 = struct {
+    x: f64,
+    y: f64,
+
+    pub fn add(a: Vec2, b: Vec2) Vec2 {
+        return .{ .x = a.x + b.x, .y = a.y + b.y };
+    }
 };
 
-// Constants for floating point comparison
-const EPSILON: f64 = 1e-10;
-
-/// Solves quadratic equation ax² + bx + c = 0
-/// Returns array of roots (empty if no real roots, 1-2 elements otherwise)
-pub fn solve(allocator: std.mem.Allocator, a: f64, b: f64, c: f64) QuadraticError![]f64 {
-    // Validate inputs for special values
-    if (math.isNan(a) or math.isNan(b) or math.isNan(c) or
-        math.isInf(a) or math.isInf(b) or math.isInf(c)) {
-        return QuadraticError.InvalidInput;
+// Engine responsible for straight uniform motion (no deformation, no acceleration)
+// It is decoupled from concrete objects and only relies on the object's interface.
+// Expected object interface (duck-typed):
+//   getPosition(self: *T) !Vec2
+//   getVelocity(self: *T) !Vec2
+//   setPosition(self: *T, new_pos: Vec2) !void
+pub const Movement = struct {
+    pub fn step(obj: anytype) !void {
+        const pos = try obj.getPosition();
+        const vel = try obj.getVelocity();
+        try obj.setPosition(Vec2.add(pos, vel));
     }
-    
-    // Check if 'a' is effectively zero (using epsilon comparison)
-    if (@abs(a) < EPSILON) {
-        return QuadraticError.InvalidCoefficientA;
+};
+
+// Engine responsible for rotation around axis
+// Expected object interface (duck-typed):
+//   getOrientation(self: *T) !f64
+//   getAngularVelocity(self: *T) !f64
+//   setOrientation(self: *T, new_angle: f64) !void
+pub const Rotation = struct {
+    pub fn step(obj: anytype) !void {
+        const angle = try obj.getOrientation();
+        const omega = try obj.getAngularVelocity();
+        try obj.setOrientation(angle + omega);
     }
-    
-    // Calculate discriminant: b² - 4ac
-    const discriminant = b * b - 4.0 * a * c;
-    
-    if (discriminant < 0) {
-        // No real roots
-        return allocator.alloc(f64, 0);
-    } else if (@abs(discriminant) < EPSILON) {
-        // One root (discriminant ≈ 0)
-        const root = -b / (2.0 * a);
-        var roots = try allocator.alloc(f64, 1);
-        roots[0] = root;
-        return roots;
-    } else {
-        // Two distinct roots
-        const sqrt_discriminant = @sqrt(discriminant);
-        const root1 = (-b + sqrt_discriminant) / (2.0 * a);
-        const root2 = (-b - sqrt_discriminant) / (2.0 * a);
-        
-        var roots = try allocator.alloc(f64, 2);
-        roots[0] = root1;
-        roots[1] = root2;
-        return roots;
+};
+
+// Example implementations used in tests
+pub const GoodShip = struct {
+    pos: Vec2,
+    vel: Vec2,
+    angle: f64,
+    ang_vel: f64,
+
+    pub fn getPosition(self: *GoodShip) !Vec2 {
+        return self.pos;
     }
-}
-
-pub export fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
-
-test "basic add functionality" {
-    std.debug.print("[TEST] Running basic add functionality test...\n", .{});
-    try testing.expect(add(3, 7) == 10);
-    std.debug.print("[TEST] Basic add functionality test passed!\n", .{});
-}
-
-// TDD Test 1: x² + 1 = 0 should have no real roots
-test "quadratic equation x^2 + 1 = 0 has no real roots" {
-    std.debug.print("[TEST] Running quadratic equation x^2 + 1 = 0 (no real roots) test...\n", .{});
-    const allocator = testing.allocator;
-    const roots = try solve(allocator, 1.0, 0.0, 1.0); // a=1, b=0, c=1
-    defer allocator.free(roots);
-    
-    try testing.expect(roots.len == 0); // Should return empty array
-    std.debug.print("[TEST] No real roots test passed! Found {} roots as expected.\n", .{roots.len});
-}
-
-// TDD Test 2: x² - 1 = 0 should have two distinct real roots: x1=1, x2=-1
-test "quadratic equation x^2 - 1 = 0 has two distinct roots" {
-    std.debug.print("[TEST] Running quadratic equation x^2 - 1 = 0 (two distinct roots) test...\n", .{});
-    const allocator = testing.allocator;
-    const roots = try solve(allocator, 1.0, 0.0, -1.0); // a=1, b=0, c=-1
-    defer allocator.free(roots);
-    
-    try testing.expect(roots.len == 2); // Should return two roots
-    
-    // Sort roots to ensure consistent order for testing
-    if (roots.len == 2) {
-        const x1 = @min(roots[0], roots[1]);
-        const x2 = @max(roots[0], roots[1]);
-        
-        try testing.expectApproxEqAbs(-1.0, x1, 1e-10); // x1 = -1
-        try testing.expectApproxEqAbs(1.0, x2, 1e-10);  // x2 = 1
-        std.debug.print("[TEST] Two distinct roots test passed! Found roots: x1={d}, x2={d}\n", .{x1, x2});
+    pub fn getVelocity(self: *GoodShip) !Vec2 {
+        return self.vel;
     }
+    pub fn setPosition(self: *GoodShip, p: Vec2) !void {
+        self.pos = p;
+    }
+
+    pub fn getOrientation(self: *GoodShip) !f64 {
+        return self.angle;
+    }
+    pub fn getAngularVelocity(self: *GoodShip) !f64 {
+        return self.ang_vel;
+    }
+    pub fn setOrientation(self: *GoodShip, a: f64) !void {
+        self.angle = a;
+    }
+};
+
+pub const NoPositionReader = struct {
+    vel: Vec2 = .{ .x = 0, .y = 0 },
+
+    pub fn getPosition(_: *NoPositionReader) !Vec2 {
+        return error.UnreadablePosition;
+    }
+    pub fn getVelocity(self: *NoPositionReader) !Vec2 {
+        return self.vel;
+    }
+    pub fn setPosition(_: *NoPositionReader, _: Vec2) !void {
+        // pretend to succeed if called; this should not be reached in the failing case
+    }
+};
+
+pub const NoVelocityReader = struct {
+    pos: Vec2 = .{ .x = 0, .y = 0 },
+
+    pub fn getPosition(self: *NoVelocityReader) !Vec2 {
+        return self.pos;
+    }
+    pub fn getVelocity(_: *NoVelocityReader) !Vec2 {
+        return error.UnreadableVelocity;
+    }
+    pub fn setPosition(_: *NoVelocityReader, _: Vec2) !void {}
+};
+
+pub const NoPositionWriter = struct {
+    pos: Vec2 = .{ .x = 0, .y = 0 },
+    vel: Vec2 = .{ .x = 0, .y = 0 },
+
+    pub fn getPosition(self: *NoPositionWriter) !Vec2 {
+        return self.pos;
+    }
+    pub fn getVelocity(self: *NoPositionWriter) !Vec2 {
+        return self.vel;
+    }
+    pub fn setPosition(_: *NoPositionWriter, _: Vec2) !void {
+        return error.UnwritablePosition;
+    }
+};
+
+pub const NoOrientationReader = struct {
+    ang_vel: f64 = 0,
+
+    pub fn getOrientation(_: *NoOrientationReader) !f64 {
+        return error.UnreadableOrientation;
+    }
+    pub fn getAngularVelocity(self: *NoOrientationReader) !f64 {
+        return self.ang_vel;
+    }
+    pub fn setOrientation(_: *NoOrientationReader, _: f64) !void {}
+};
+
+pub const NoOrientationWriter = struct {
+    angle: f64 = 0,
+    ang_vel: f64 = 0,
+
+    pub fn getOrientation(self: *NoOrientationWriter) !f64 {
+        return self.angle;
+    }
+    pub fn getAngularVelocity(self: *NoOrientationWriter) !f64 {
+        return self.ang_vel;
+    }
+    pub fn setOrientation(_: *NoOrientationWriter, _: f64) !void {
+        return error.UnwritableOrientation;
+    }
+};
+
+// ------------------ Tests ------------------
+
+// Movement tests (specified in the assignment)
+test "Movement: (12,5) + (-7,3) -> (5,8)" {
+    var ship = GoodShip{
+        .pos = .{ .x = 12, .y = 5 },
+        .vel = .{ .x = -7, .y = 3 },
+        .angle = 0,
+        .ang_vel = 0,
+    };
+
+    try Movement.step(&ship);
+    try testing.expectEqual(@as(f64, 5), ship.pos.x);
+    try testing.expectEqual(@as(f64, 8), ship.pos.y);
 }
 
-// TDD Test 3: Quadratic equation with discriminant < epsilon but > 0 (single root case)
-// Using coefficients: a=1, b=2, c=1-2.5e-12
-// Discriminant = 4 - 4(1)(1-2.5e-12) = 4 - 4 + 1e-11 = 1e-11 (which is > 0 but < EPSILON=1e-10)
-test "quadratic equation with small positive discriminant has one root" {
-    std.debug.print("[TEST] Running quadratic equation with small positive discriminant test...\n", .{});
-    const allocator = testing.allocator;
-    const a: f64 = 1.0;
-    const b: f64 = 2.0;
-    const c: f64 = 1.0 - 2.5e-12; // This creates discriminant = 1e-11
-    
-    const roots = try solve(allocator, a, b, c);
-    defer allocator.free(roots);
-    
-    try testing.expect(roots.len == 1); // Should return one root (treated as single due to epsilon)
-    
-    // Expected root: -b/(2a) = -2/2 = -1
-    try testing.expectApproxEqAbs(-1.0, roots[0], 1e-9); // x ≈ -1
-    std.debug.print("[TEST] Small positive discriminant test passed! Found single root: x={d}\n", .{roots[0]});
+test "Movement: error when position cannot be read" {
+    var bad = NoPositionReader{ .vel = .{ .x = 1, .y = 1 } };
+    try testing.expectError(error.UnreadablePosition, Movement.step(&bad));
 }
 
-// Additional Test: Perfect square case (discriminant exactly zero)
-test "quadratic equation x^2 + 2x + 1 = 0 perfect square" {
-    std.debug.print("[TEST] Running quadratic equation x^2 + 2x + 1 = 0 (perfect square) test...\n", .{});
-    const allocator = testing.allocator;
-    const roots = try solve(allocator, 1.0, 2.0, 1.0); // a=1, b=2, c=1 (discriminant = 0)
-    defer allocator.free(roots);
-    
-    try testing.expect(roots.len == 1); // Should return one root
-    try testing.expectApproxEqAbs(-1.0, roots[0], 1e-10); // x = -1
-    std.debug.print("[TEST] Perfect square test passed! Found single root: x={d}\n", .{roots[0]});
+test "Movement: error when velocity cannot be read" {
+    var bad = NoVelocityReader{ .pos = .{ .x = 0, .y = 0 } };
+    try testing.expectError(error.UnreadableVelocity, Movement.step(&bad));
 }
 
-// TDD Test 4: a = 0 should throw InvalidCoefficientA exception
-test "coefficient a cannot be zero" {
-    std.debug.print("[TEST] Running coefficient a cannot be zero test...\n", .{});
-    const allocator = testing.allocator;
-    
-    // Test exact zero
-    try testing.expectError(QuadraticError.InvalidCoefficientA, solve(allocator, 0.0, 2.0, 1.0));
-    std.debug.print("[TEST] ✓ Exact zero a=0.0 correctly rejected\n", .{});
-    
-    // Test very small value (less than epsilon)
-    try testing.expectError(QuadraticError.InvalidCoefficientA, solve(allocator, 1e-15, 2.0, 1.0));
-    std.debug.print("[TEST] ✓ Very small positive a=1e-15 correctly rejected\n", .{});
-    
-    // Test negative very small value
-    try testing.expectError(QuadraticError.InvalidCoefficientA, solve(allocator, -1e-15, 2.0, 1.0));
-    std.debug.print("[TEST] ✓ Very small negative a=-1e-15 correctly rejected\n", .{});
-    std.debug.print("[TEST] Coefficient a cannot be zero test passed!\n", .{});
+test "Movement: error when position cannot be written" {
+    var bad = NoPositionWriter{ .pos = .{ .x = 0, .y = 0 }, .vel = .{ .x = 1, .y = 1 } };
+    try testing.expectError(error.UnwritablePosition, Movement.step(&bad));
 }
 
-// TDD Test 5: Special double values (NaN, infinity) should throw InvalidInput exception
-test "special double values should be rejected" {
-    std.debug.print("[TEST] Running special double values should be rejected test...\n", .{});
-    const allocator = testing.allocator;
-    
-    // Test NaN in coefficient a
-    try testing.expectError(QuadraticError.InvalidInput, solve(allocator, math.nan(f64), 1.0, 1.0));
-    std.debug.print("[TEST] ✓ NaN in coefficient a correctly rejected\n", .{});
-    
-    // Test NaN in coefficient b
-    try testing.expectError(QuadraticError.InvalidInput, solve(allocator, 1.0, math.nan(f64), 1.0));
-    std.debug.print("[TEST] ✓ NaN in coefficient b correctly rejected\n", .{});
-    
-    // Test NaN in coefficient c
-    try testing.expectError(QuadraticError.InvalidInput, solve(allocator, 1.0, 1.0, math.nan(f64)));
-    std.debug.print("[TEST] ✓ NaN in coefficient c correctly rejected\n", .{});
-    
-    // Test positive infinity in coefficient a
-    try testing.expectError(QuadraticError.InvalidInput, solve(allocator, math.inf(f64), 1.0, 1.0));
-    std.debug.print("[TEST] ✓ Positive infinity in coefficient a correctly rejected\n", .{});
-    
-    // Test positive infinity in coefficient b
-    try testing.expectError(QuadraticError.InvalidInput, solve(allocator, 1.0, math.inf(f64), 1.0));
-    std.debug.print("[TEST] ✓ Positive infinity in coefficient b correctly rejected\n", .{});
-    
-    // Test positive infinity in coefficient c
-    try testing.expectError(QuadraticError.InvalidInput, solve(allocator, 1.0, 1.0, math.inf(f64)));
-    std.debug.print("[TEST] ✓ Positive infinity in coefficient c correctly rejected\n", .{});
-    
-    // Test negative infinity in coefficient a
-    try testing.expectError(QuadraticError.InvalidInput, solve(allocator, -math.inf(f64), 1.0, 1.0));
-    std.debug.print("[TEST] ✓ Negative infinity in coefficient a correctly rejected\n", .{});
-    
-    // Test negative infinity in coefficient b
-    try testing.expectError(QuadraticError.InvalidInput, solve(allocator, 1.0, -math.inf(f64), 1.0));
-    std.debug.print("[TEST] ✓ Negative infinity in coefficient b correctly rejected\n", .{});
-    
-    // Test negative infinity in coefficient c
-    try testing.expectError(QuadraticError.InvalidInput, solve(allocator, 1.0, 1.0, -math.inf(f64)));
-    std.debug.print("[TEST] ✓ Negative infinity in coefficient c correctly rejected\n", .{});
-    
-    std.debug.print("[TEST] Special double values test passed! All 9 special value cases handled correctly.\n", .{});
+// Rotation tests
+test "Rotation: angle increases by angular velocity" {
+    var ship = GoodShip{
+        .pos = .{ .x = 0, .y = 0 },
+        .vel = .{ .x = 0, .y = 0 },
+        .angle = 30,
+        .ang_vel = 15,
+    };
+
+    try Rotation.step(&ship);
+    try testing.expectEqual(@as(f64, 45), ship.angle);
+}
+
+test "Rotation: error when orientation cannot be read" {
+    var bad = NoOrientationReader{ .ang_vel = 5 };
+    try testing.expectError(error.UnreadableOrientation, Rotation.step(&bad));
+}
+
+test "Rotation: error when orientation cannot be written" {
+    var bad = NoOrientationWriter{ .angle = 0, .ang_vel = 90 };
+    try testing.expectError(error.UnwritableOrientation, Rotation.step(&bad));
 }
