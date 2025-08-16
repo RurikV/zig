@@ -17,7 +17,7 @@ jobs:
         zig-version: ['0.14.1', 'master']
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
@@ -60,7 +60,7 @@ jobs:
             artifact-name: zig-macos-x86_64
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Zig
         uses: goto-bus-stop/setup-zig@v2
@@ -146,7 +146,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
