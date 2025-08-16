@@ -1,0 +1,159 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [ published ]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zig-version: ['0.14.1', 'master']
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ matrix.zig-version }}
+
+      - name: Cache Zig dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            zig-cache
+          key: ${{ runner.os }}-zig-${{ matrix.zig-version }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-${{ matrix.zig-version }}-
+            ${{ runner.os }}-zig-
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Build project
+        run: zig build
+
+  build-and-release:
+    name: Build and Release
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux
+            artifact-name: zig-linux-x86_64
+          - os: windows-latest
+            target: x86_64-windows
+            artifact-name: zig-windows-x86_64
+          - os: macos-latest
+            target: x86_64-macos
+            artifact-name: zig-macos-x86_64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: '0.14.1'
+
+      - name: Cache Zig dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            zig-cache
+          key: ${{ runner.os }}-zig-0.14.1-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-0.14.1-
+            ${{ runner.os }}-zig-
+
+      - name: Build for target
+        run: zig build -Dtarget=${{ matrix.target }}
+
+      - name: Prepare artifacts (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p artifacts
+          cp zig-out/bin/zig artifacts/zig
+          cp zig-out/lib/libzig.a artifacts/libzig.a
+          chmod +x artifacts/zig
+
+      - name: Prepare artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir artifacts
+          copy zig-out\bin\zig.exe artifacts\zig.exe
+          copy zig-out\lib\libzig.a artifacts\libzig.a
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: artifacts/
+          retention-days: 30
+
+      - name: Create release archive (Unix)
+        if: github.event_name == 'release' && runner.os != 'Windows'
+        run: |
+          cd artifacts
+          tar -czf ../${{ matrix.artifact-name }}.tar.gz *
+
+      - name: Create release archive (Windows)
+        if: github.event_name == 'release' && runner.os == 'Windows'
+        run: |
+          cd artifacts
+          7z a ..\${{ matrix.artifact-name }}.zip *
+
+      - name: Upload to release (Unix)
+        if: github.event_name == 'release' && runner.os != 'Windows'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ${{ matrix.artifact-name }}.tar.gz
+          asset_name: ${{ matrix.artifact-name }}.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Upload to release (Windows)
+        if: github.event_name == 'release' && runner.os == 'Windows'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ${{ matrix.artifact-name }}.zip
+          asset_name: ${{ matrix.artifact-name }}.zip
+          asset_content_type: application/zip
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
