@@ -94,7 +94,7 @@ jobs:
         run: |
           mkdir artifacts
           copy zig-out\bin\zig.exe artifacts\zig.exe
-          copy zig-out\lib\libzig.a artifacts\libzig.a
+          copy zig-out\lib\zig.lib artifacts\zig.lib
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
