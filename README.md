@@ -138,3 +138,55 @@ Build fails?
 Tests fail?
 - Run locally with the same Zig version: `zig build test`
 - Check printed [TEST] logs for details
+
+## Exception Handling (Commands & Handlers)
+
+A pluggable mechanism to process commands with centralized error handling.
+
+- Core abstraction: `Command { ctx: *anyopaque, call: *const fn(*anyopaque, *CommandQueue) !void, tag: CommandTag }`
+- Queue: `CommandQueue` with `pushBack`, `pushFront`, `popFront` and allocator-aware storage.
+- Factory: `CommandFactory(T, exec)` creates a thin thunk so any struct with an `exec` function can be turned into a `Command`.
+- Logging: `LogBuffer` collects lines; `LogCtx` writes `"tag=<...> err=<...>"` entries.
+- Handlers (strategies implemented):
+  - `handlerRetryOnFirstFailure`: on first failure of a non-wrapper command, enqueue a one-time retry wrapper.
+  - `handlerLogAfterRetryOnce`: if the one-time retry fails, enqueue a log command.
+  - `handlerRetrySecondTime`: if the one-time retry fails, enqueue a second retry wrapper.
+  - `handlerLogAfterSecondRetry`: if the second retry fails, enqueue a log command.
+
+Supported strategies (compose handlers in order):
+- First failure → retry; second failure → log:
+  - `[ handlerRetryOnFirstFailure, handlerLogAfterRetryOnce ]`
+- Retry twice, then log:
+  - `[ handlerRetryOnFirstFailure, handlerRetrySecondTime, handlerLogAfterSecondRetry ]`
+
+Minimal usage example:
+```zig
+const std = @import("std");
+const core = @import("commands/core.zig");
+const handlers = @import("commands/handlers.zig");
+
+pub fn demo(alloc: std.mem.Allocator) !void {
+    var q = core.CommandQueue.init(alloc);
+    defer q.deinit();
+
+    var buf = core.LogBuffer.init(alloc);
+    defer buf.deinit();
+
+    // Example command: always fails
+    var job = core.AlwaysFailsCtx{};
+    const make = core.CommandFactory(core.AlwaysFailsCtx, core.execAlwaysFails);
+    try q.pushBack(make.make(&job, .always_fails));
+
+    // Strategy: retry once then log
+    const pipeline = [_]handlers.Handler{
+        .{ .ctx = null, .call = handlers.handlerRetryOnFirstFailure },
+        .{ .ctx = &buf, .call = handlers.handlerLogAfterRetryOnce },
+    };
+
+    handlers.process(&q, pipeline[0..]);
+
+    // Inspect logs if needed: buf.lines.items
+}
+```
+
+Tests cover both strategies (first fail → retry → log; retry twice → log) under `src/commands/tests_exceptions.zig`. Run them with `zig build test`.
