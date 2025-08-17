@@ -73,3 +73,17 @@ pub fn handlerLogAfterSecondRetry(hctx: ?*anyopaque, err: anyerror, failed: core
     q.pushBack(cmd) catch {};
     return true;
 }
+
+// General-purpose logging handler: enqueue a log command for any failure
+// Skips logging for an already-log command to avoid loops.
+pub fn handlerLogAlways(hctx: ?*anyopaque, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
+    if (failed.is_log) return false;
+    const raw = hctx orelse return false;
+    const buf: *core.LogBuffer = @ptrCast(@alignCast(raw));
+    const lctx = q.allocator.create(core.LogCtx) catch return false;
+    lctx.* = .{ .buf = buf, .source = failed.tag, .err = err };
+    const maker = core.CommandFactory(core.LogCtx, core.execLog);
+    const cmd = maker.makeOwned(lctx, .log, false, true);
+    q.pushBack(cmd) catch {};
+    return true;
+}

@@ -128,3 +128,54 @@ test "Exceptions: retry twice then log" {
     try testing.expectEqual(@as(usize, 3), af.attempts);
     try testing.expectEqual(@as(usize, 1), buf.lines.items.len);
 }
+
+const handlerLogAlways = handlers.handlerLogAlways;
+
+// Scenario: Direct LogCommand writes a line
+test "Exceptions: direct LogCommand writes a line" {
+    t.tprint("Exceptions test: direct LogCommand writes a line\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var buf = LogBuffer.init(alloc);
+    defer buf.deinit();
+
+    var q = CommandQueue.init(alloc);
+    defer q.deinit();
+
+    var lctx = core.LogCtx{ .buf = &buf, .source = .always_fails, .err = core.CommandError.Boom };
+    const maker = CommandFactory(core.LogCtx, core.execLog);
+    try q.pushBack(maker.make(&lctx, .log));
+
+    const hs = [_]Handler{}; // no special handlers needed
+    process(&q, hs[0..]);
+
+    try testing.expectEqual(@as(usize, 1), buf.lines.items.len);
+}
+
+// Scenario: General log handler enqueues a log after any failure
+test "Exceptions: general log handler enqueues log after failure" {
+    t.tprint("Exceptions test: handlerLogAlways enqueues log after failure\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var buf = LogBuffer.init(alloc);
+    defer buf.deinit();
+
+    var q = CommandQueue.init(alloc);
+    defer q.deinit();
+
+    var af = AlwaysFailsCtx{}; // will fail immediately
+    const make_af = CommandFactory(AlwaysFailsCtx, core.execAlwaysFails);
+    try q.pushBack(make_af.make(&af, .always_fails));
+
+    const hs = [_]Handler{
+        .{ .ctx = &buf, .call = handlerLogAlways },
+    };
+
+    process(&q, hs[0..]);
+
+    try testing.expectEqual(@as(usize, 1), buf.lines.items.len);
+}
