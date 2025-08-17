@@ -1,178 +1,136 @@
-# Zig Project with CI/CD
+# Space Battle: Movement and Rotation Engines (Zig)
 
-A Zig project with automated CI/CD pipeline using GitHub Actions.
+SOLID-friendly core for a “Space Battle” game server implemented in Zig. The repository focuses on two independent engines:
+- Movement: straight, uniform motion without deformation.
+- Rotation: angular update around an axis.
 
-## Project Structure
+Both engines are decoupled from concrete game objects via duck-typed interfaces (no inheritance needed). The code is covered by unit tests with talkative [TEST] logs.
 
-This project consists of:
-- **Library**: A static library built from `src/root.zig`
-- **Executable**: A command-line application built from `src/main.zig`
-- **Tests**: Unit tests for both library and executable components
+## Overview
 
-## Building
+- Language: Zig 0.14.1+
+- Library: `src/root.zig` implements engines and tests.
+- Executable: `src/main.zig` only prints a small info message; all logic is exercised by tests.
+- Build system: `build.zig` builds both a static library and an executable, and exposes `zig build test`.
 
-### Prerequisites
-- Zig 0.14.1 or later
+## Quick Start
 
-### Local Development
+Prerequisites:
+- Install Zig 0.14.1 or later.
 
+Local usage:
 ```bash
 # Build the project
 zig build
 
-# Run tests
+# Run tests (shows detailed [TEST] progress lines)
 zig build test
 
-# Run the executable
+# Run the sample executable (prints a short hint)
 zig build run
 
-# Clean build artifacts
+# Clean local build artifacts
 rm -rf zig-cache zig-out
 ```
 
-### Build Options
-
+### Build options
 ```bash
-# Build for specific target
+# Build for a specific target
 zig build -Dtarget=x86_64-linux
 
-# Build with optimization
+# Choose optimization profile
 zig build -Doptimize=ReleaseFast
-
-# Available optimization modes: Debug, ReleaseSafe, ReleaseFast, ReleaseSmall
+# Available: Debug, ReleaseSafe, ReleaseFast, ReleaseSmall
 ```
 
-## CI/CD Pipeline
+## Features
 
-This project uses GitHub Actions for continuous integration and deployment.
+- Movement engine (straight uniform motion):
+  - Reads position and velocity from any object implementing the expected interface.
+  - Computes new position as pos + vel and writes it back.
+  - Proper error propagation if position/velocity cannot be read or position cannot be written.
+- Rotation engine:
+  - Reads current orientation (angle) and angular velocity.
+  - Updates orientation as angle + omega.
+  - Proper error propagation if orientation cannot be read or written.
+- Tests are “talkative” and print [TEST] logs so you can see progress and expected errors.
 
-### Workflows
+## Minimal API (duck-typed interfaces)
 
-#### 1. CI/CD Pipeline (`.github/workflows/ci.yml`)
+Your object can participate in movement if it provides these methods:
+```zig
+getPosition(self: *T) !Vec2
+getVelocity(self: *T) !Vec2
+setPosition(self: *T, new_pos: Vec2) !void
+```
+It can participate in rotation if it provides:
+```zig
+getOrientation(self: *T) !f64
+getAngularVelocity(self: *T) !f64
+setOrientation(self: *T, new_angle: f64) !void
+```
+Then simply call:
+```zig
+try Movement.step(&object);
+try Rotation.step(&object);
+```
 
-**Triggers:**
-- Push to `main` or `master` branches
-- Pull requests to `main` or `master` branches
-- GitHub releases
+## Tests Included
 
-**Jobs:**
+Movement:
+- (12, 5) + (-7, 3) -> (5, 8)
+- Error when position cannot be read
+- Error when velocity cannot be read
+- Error when position cannot be written
 
-##### Test Job
-- **Matrix Testing**: Tests against Zig versions `0.14.1` and `master`
-- **Platform**: Ubuntu Latest
-- **Steps**:
-  1. Checkout code
-  2. Setup Zig toolchain
-  3. Cache dependencies for faster builds
-  4. Run unit tests (`zig build test`)
-  5. Build project (`zig build`)
+Rotation:
+- Angle increases by angular velocity
+- Error when orientation cannot be read
+- Error when orientation cannot be written
 
-##### Build and Release Job
-- **Cross-Platform**: Builds on Linux, Windows, and macOS
-- **Dependencies**: Runs only after successful tests
-- **Artifacts**: Creates platform-specific binaries
-- **Steps**:
-  1. Checkout code
-  2. Setup Zig 0.14.1
-  3. Cache dependencies
-  4. Build for target platform
-  5. Package artifacts (executable + library)
-  6. Upload artifacts (30-day retention)
-  7. **On Release**: Create and upload release archives
+Run with:
+```bash
+zig build test
+```
 
-##### Security Scan Job
-- **Tool**: Trivy vulnerability scanner
-- **Output**: SARIF format for GitHub Security tab
-- **Coverage**: Scans entire filesystem for vulnerabilities
+## Project Structure
 
-### Artifacts
+- src/root.zig — Vec2, Movement, Rotation, sample structs, and tests.
+- src/main.zig — Minimal entry point printing guidance text.
+- build.zig — Builds static library and executable; adds test targets.
+- .github/workflows — CI workflows for tests, builds, and security scan.
 
-Each successful build produces:
-- **Executable**: `zig` (platform-specific)
-- **Library**: `libzig.a` (static library)
+## CI/CD
 
-**Artifact Naming Convention:**
+GitHub Actions run on pushes/PRs and releases (see `.github/workflows/ci.yml`):
+- Matrix tests on Zig `0.14.1` and `master` (Ubuntu).
+- Cross-platform builds for Linux, Windows, macOS (after tests pass).
+- Artifacts: platform executables and static library.
+- On release: archives are attached to the GitHub Release.
+
+Artifacts naming (as configured):
 - Linux: `zig-linux-x86_64.tar.gz`
 - Windows: `zig-windows-x86_64.zip`
 - macOS: `zig-macos-x86_64.tar.gz`
 
-### Caching Strategy
+Caching:
+- Uses `~/.cache/zig` and `zig-cache/` keyed by OS, Zig version, and `build.zig.zon` hash.
 
-The pipeline uses GitHub Actions cache to speed up builds:
-- **Zig Cache**: `~/.cache/zig` and `zig-cache/`
-- **Cache Key**: Based on OS, Zig version, and `build.zig.zon` hash
-- **Benefits**: Faster dependency resolution and compilation
-
-### Dependency Management
-
-- **Dependabot**: Configured to update GitHub Actions weekly
-- **Configuration**: `.github/dependabot.yml`
-- **Auto-updates**: GitHub Actions dependencies only
-
-## Release Process
-
-### Creating a Release
-
-1. **Tag Version**: Create and push a Git tag
-   ```bash
-   git tag v1.0.0
-   git push origin v1.0.0
-   ```
-
-2. **GitHub Release**: Create a release from the tag on GitHub
-   - The CI/CD pipeline automatically builds and uploads artifacts
-   - Cross-platform binaries are attached to the release
-
-### Release Assets
-
-Each release includes:
-- `zig-linux-x86_64.tar.gz` - Linux x86_64 binary
-- `zig-windows-x86_64.zip` - Windows x86_64 binary  
-- `zig-macos-x86_64.tar.gz` - macOS x86_64 binary
-
-## Security
-
-- **Vulnerability Scanning**: Automated with Trivy
-- **SARIF Integration**: Results appear in GitHub Security tab
-- **Dependency Updates**: Automated via Dependabot
+Security:
+- Trivy scanner produces SARIF uploaded to GitHub Security tab.
+- Dependabot keeps GitHub Actions up to date.
 
 ## Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Ensure tests pass locally: `zig build test`
-5. Submit a pull request
-
-The CI/CD pipeline will automatically:
-- Run tests against multiple Zig versions
-- Build cross-platform binaries
-- Perform security scanning
-- Provide build status feedback
+- Run `zig build test` locally before opening a PR.
+- Keep tests talkative and add new cases for new behaviors.
 
 ## Troubleshooting
 
-### Common Issues
-
-**Build Failures:**
-- Check Zig version compatibility (minimum 0.14.1)
-- Verify `build.zig.zon` syntax
+Build fails?
+- Ensure Zig ≥ 0.14.1
 - Clear cache: `rm -rf zig-cache`
 
-**Test Failures:**
-- Run tests locally: `zig build test`
-- Check for platform-specific issues
-- Review test output in CI logs
-
-**Artifact Issues:**
-- Ensure proper artifact naming in workflow
-- Check file permissions on Unix systems
-- Verify target platform compatibility
-
-### CI/CD Debug
-
-To debug CI/CD issues:
-1. Check the Actions tab in GitHub repository
-2. Review job logs for specific errors
-3. Test locally with same Zig version
-4. Check artifact upload/download logs
+Tests fail?
+- Run locally with the same Zig version: `zig build test`
+- Check printed [TEST] logs for details
