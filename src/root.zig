@@ -8,8 +8,8 @@ pub const Rotation = @import("space/rotation.zig").Rotation;
 
 // Commands namespace: core types and handlers
 pub const commands = struct {
-    pub usingnamespace @import("commands/core.zig");
-    pub usingnamespace @import("commands/handlers.zig");
+    usingnamespace @import("commands/core.zig");
+    usingnamespace @import("commands/handlers.zig");
 };
 
 // Ensure tests from split files are compiled
