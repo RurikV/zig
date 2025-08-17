@@ -1,10 +1,10 @@
 const std = @import("std");
 const core = @import("core.zig");
 
-pub const HandlerFn = fn (buf: ?*core.LogBuffer, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool;
+pub const HandlerFn = fn (ctx: ?*anyopaque, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool;
 
 pub const Handler = struct {
-    ctx: ?*core.LogBuffer,
+    ctx: ?*anyopaque,
     call: *const HandlerFn,
 };
 
@@ -54,7 +54,7 @@ pub fn process(queue: *core.CommandQueue, handlers: []const Handler) void {
 // Specific handlers
 
 // Retry on first failure for original commands (not retry/log)
-pub fn handlerRetryOnFirstFailure(_: ?*core.LogBuffer, _: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
+pub fn handlerRetryOnFirstFailure(_: ?*anyopaque, _: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
     switch (failed.tag) {
         .retry_once, .retry_twice, .log => return false,
         else => {},
@@ -69,9 +69,10 @@ pub fn handlerRetryOnFirstFailure(_: ?*core.LogBuffer, _: anyerror, failed: core
 }
 
 // Log when retry-once fails
-pub fn handlerLogAfterRetryOnce(hctx: ?*core.LogBuffer, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
+pub fn handlerLogAfterRetryOnce(hctx: ?*anyopaque, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
     if (failed.tag != .retry_once) return false;
-    const buf = hctx orelse return false;
+    const raw = hctx orelse return false;
+    const buf: *core.LogBuffer = @ptrCast(@alignCast(raw));
     const lctx = q.allocator.create(core.LogCtx) catch return false;
     lctx.* = .{ .buf = buf, .source = failed.tag, .err = err };
     const maker = core.CommandFactory(core.LogCtx, core.execLog);
@@ -80,7 +81,7 @@ pub fn handlerLogAfterRetryOnce(hctx: ?*core.LogBuffer, err: anyerror, failed: c
 }
 
 // Second retry when retry-once fails
-pub fn handlerRetrySecondTime(_: ?*core.LogBuffer, _: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
+pub fn handlerRetrySecondTime(_: ?*anyopaque, _: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
     if (failed.tag != .retry_once) return false;
     const ctx = q.allocator.create(core.RetryTwiceCtx) catch return false;
     ctx.* = .{ .inner = failed };
@@ -90,9 +91,10 @@ pub fn handlerRetrySecondTime(_: ?*core.LogBuffer, _: anyerror, failed: core.Com
 }
 
 // Log when retry-twice fails
-pub fn handlerLogAfterSecondRetry(hctx: ?*core.LogBuffer, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
+pub fn handlerLogAfterSecondRetry(hctx: ?*anyopaque, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
     if (failed.tag != .retry_twice) return false;
-    const buf = hctx orelse return false;
+    const raw = hctx orelse return false;
+    const buf: *core.LogBuffer = @ptrCast(@alignCast(raw));
     const lctx = q.allocator.create(core.LogCtx) catch return false;
     lctx.* = .{ .buf = buf, .source = failed.tag, .err = err };
     const maker = core.CommandFactory(core.LogCtx, core.execLog);

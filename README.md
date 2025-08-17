@@ -190,3 +190,5 @@ pub fn demo(alloc: std.mem.Allocator) !void {
 ```
 
 Tests cover both strategies (first fail → retry → log; retry twice → log) under `src/commands/tests_exceptions.zig`. Run them with `zig build test`.
+
+
