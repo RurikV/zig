@@ -14,40 +14,10 @@ pub fn process(queue: *core.CommandQueue, handlers: []const Handler) void {
             for (handlers) |h| {
                 if (h.call(h.ctx, err, cmd, queue)) break;
             }
-            // Free owned contexts for wrapper/log commands even on failure
-            switch (cmd.tag) {
-                .retry_once => {
-                    const p: *core.RetryOnceCtx = @ptrCast(@alignCast(cmd.ctx));
-                    queue.allocator.destroy(p);
-                },
-                .retry_twice => {
-                    const p: *core.RetryTwiceCtx = @ptrCast(@alignCast(cmd.ctx));
-                    queue.allocator.destroy(p);
-                },
-                .log => {
-                    const p: *core.LogCtx = @ptrCast(@alignCast(cmd.ctx));
-                    queue.allocator.destroy(p);
-                },
-                else => {},
-            }
+            if (cmd.drop) |d| d(cmd.ctx, queue.allocator);
             continue;
         };
-        // on success, free owned contexts and continue
-        switch (cmd.tag) {
-            .retry_once => {
-                const p: *core.RetryOnceCtx = @ptrCast(@alignCast(cmd.ctx));
-                queue.allocator.destroy(p);
-            },
-            .retry_twice => {
-                const p: *core.RetryTwiceCtx = @ptrCast(@alignCast(cmd.ctx));
-                queue.allocator.destroy(p);
-            },
-            .log => {
-                const p: *core.LogCtx = @ptrCast(@alignCast(cmd.ctx));
-                queue.allocator.destroy(p);
-            },
-            else => {},
-        }
+        if (cmd.drop) |d| d(cmd.ctx, queue.allocator);
     }
 }
 
@@ -55,49 +25,51 @@ pub fn process(queue: *core.CommandQueue, handlers: []const Handler) void {
 
 // Retry on first failure for original commands (not retry/log)
 pub fn handlerRetryOnFirstFailure(_: ?*anyopaque, _: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
-    switch (failed.tag) {
-        .retry_once, .retry_twice, .log => return false,
-        else => {},
-    }
+    if (failed.is_wrapper or failed.is_log) return false;
     // Enqueue immediate retry-once for the failed command
     const ctx = q.allocator.create(core.RetryOnceCtx) catch return false;
     ctx.* = .{ .inner = failed };
     const maker = core.CommandFactory(core.RetryOnceCtx, core.execRetryOnce);
-    const cmd = maker.make(ctx, .retry_once);
+    var cmd = maker.makeOwned(ctx, .retry_once, true, false);
+    cmd.retry_stage = 1;
     q.pushFront(cmd) catch {};
     return true;
 }
 
 // Log when retry-once fails
 pub fn handlerLogAfterRetryOnce(hctx: ?*anyopaque, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
-    if (failed.tag != .retry_once) return false;
+    if (!(failed.is_wrapper and failed.retry_stage == 1)) return false;
     const raw = hctx orelse return false;
     const buf: *core.LogBuffer = @ptrCast(@alignCast(raw));
     const lctx = q.allocator.create(core.LogCtx) catch return false;
     lctx.* = .{ .buf = buf, .source = failed.tag, .err = err };
     const maker = core.CommandFactory(core.LogCtx, core.execLog);
-    q.pushBack(maker.make(lctx, .log)) catch {};
+    const cmd = maker.makeOwned(lctx, .log, false, true);
+    q.pushBack(cmd) catch {};
     return true;
 }
 
 // Second retry when retry-once fails
 pub fn handlerRetrySecondTime(_: ?*anyopaque, _: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
-    if (failed.tag != .retry_once) return false;
+    if (!(failed.is_wrapper and failed.retry_stage == 1)) return false;
     const ctx = q.allocator.create(core.RetryTwiceCtx) catch return false;
     ctx.* = .{ .inner = failed };
     const maker = core.CommandFactory(core.RetryTwiceCtx, core.execRetryTwice);
-    q.pushFront(maker.make(ctx, .retry_twice)) catch {};
+    var cmd = maker.makeOwned(ctx, .retry_twice, true, false);
+    cmd.retry_stage = 2;
+    q.pushFront(cmd) catch {};
     return true;
 }
 
 // Log when retry-twice fails
 pub fn handlerLogAfterSecondRetry(hctx: ?*anyopaque, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
-    if (failed.tag != .retry_twice) return false;
+    if (!(failed.is_wrapper and failed.retry_stage == 2)) return false;
     const raw = hctx orelse return false;
     const buf: *core.LogBuffer = @ptrCast(@alignCast(raw));
     const lctx = q.allocator.create(core.LogCtx) catch return false;
     lctx.* = .{ .buf = buf, .source = failed.tag, .err = err };
     const maker = core.CommandFactory(core.LogCtx, core.execLog);
-    q.pushBack(maker.make(lctx, .log)) catch {};
+    const cmd = maker.makeOwned(lctx, .log, false, true);
+    q.pushBack(cmd) catch {};
     return true;
 }

@@ -12,11 +12,16 @@ pub const CommandTag = enum {
 };
 
 pub const CommandFn = fn (ctx: *anyopaque, q: *CommandQueue) anyerror!void;
+pub const DropFn = fn (ctx: *anyopaque, allocator: Allocator) void;
 
 pub const Command = struct {
     ctx: *anyopaque,
     call: *const CommandFn,
+    drop: ?*const DropFn = null,
     tag: CommandTag,
+    is_wrapper: bool = false,
+    is_log: bool = false,
+    retry_stage: u8 = 0,
 };
 
 pub const CommandQueue = struct {
@@ -52,8 +57,15 @@ pub fn CommandFactory(comptime T: type, comptime exec: fn (*T, *CommandQueue) an
             const typed: *T = @ptrCast(@alignCast(raw));
             return exec(typed, q);
         }
+        fn dropThunk(raw: *anyopaque, allocator: Allocator) void {
+            const typed: *T = @ptrCast(@alignCast(raw));
+            allocator.destroy(typed);
+        }
         pub fn make(ctx: *T, tag: CommandTag) Command {
-            return .{ .ctx = ctx, .call = thunk, .tag = tag };
+            return .{ .ctx = ctx, .call = thunk, .drop = null, .tag = tag, .is_wrapper = false, .is_log = false };
+        }
+        pub fn makeOwned(ctx: *T, tag: CommandTag, is_wrapper: bool, is_log: bool) Command {
+            return .{ .ctx = ctx, .call = thunk, .drop = dropThunk, .tag = tag, .is_wrapper = is_wrapper, .is_log = is_log };
         }
     };
 }
