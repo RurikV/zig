@@ -1,6 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
-const t = @import("../tests/helpers.zig");
+const t = @import("../utils/tests/helpers.zig");
 const vec = @import("vector.zig");
 const movement = @import("movement.zig");
 const rotation = @import("rotation.zig");
