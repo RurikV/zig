@@ -8,6 +8,7 @@ pub const Handler = struct {
     call: *const HandlerFn,
 };
 
+// Core processing loop: single catch of base error, then try handlers
 pub fn process(queue: *core.CommandQueue, handlers: []const Handler) void {
     while (queue.popFront()) |cmd| {
         cmd.call(cmd.ctx, queue) catch |err| {
@@ -21,7 +22,7 @@ pub fn process(queue: *core.CommandQueue, handlers: []const Handler) void {
     }
 }
 
-// -------- Helpers to avoid extra code --------
+// -------- Helpers to avoid duplication --------
 inline fn castLogBuffer(hctx: ?*anyopaque) ?*core.LogBuffer {
     const raw = hctx orelse return null;
     const buf: *core.LogBuffer = @ptrCast(@alignCast(raw));
@@ -54,7 +55,7 @@ inline fn enqueueWrapper(
     return true;
 }
 
-// -------- Specific handlers --------
+// -------- Specific handlers (composable strategies) --------
 
 // Retry on first failure for original commands (not retry/log)
 pub fn handlerRetryOnFirstFailure(_: ?*anyopaque, _: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
@@ -88,4 +89,50 @@ pub fn handlerLogAlways(hctx: ?*anyopaque, err: anyerror, failed: core.Command, 
     if (failed.is_log) return false;
     const buf = castLogBuffer(hctx) orelse return false;
     return enqueueLog(q, buf, failed.tag, err);
+}
+
+// -------- Optional registry (router) for (command, exception) -> handler --------
+const RouterEntry = struct { tag: core.CommandTag, err_name: []u8, handler: Handler };
+
+pub const ExceptionRouter = struct {
+    allocator: std.mem.Allocator,
+    items: std.ArrayListUnmanaged(RouterEntry),
+
+    pub fn init(allocator: std.mem.Allocator) ExceptionRouter {
+        return .{ .allocator = allocator, .items = .{} };
+    }
+    pub fn deinit(self: *ExceptionRouter) void {
+        for (self.items.items) |e| self.allocator.free(e.err_name);
+        self.items.deinit(self.allocator);
+    }
+    pub fn register(self: *ExceptionRouter, tag: core.CommandTag, err_name: []const u8, handler: Handler) !void {
+        const dup = try self.allocator.dupe(u8, err_name);
+        try self.items.append(self.allocator, .{ .tag = tag, .err_name = dup, .handler = handler });
+    }
+    pub fn handle(self: *ExceptionRouter, err: anyerror, failed: core.Command, q: *core.CommandQueue) bool {
+        const name = @errorName(err);
+        for (self.items.items) |e| {
+            if (e.tag == failed.tag and std.mem.eql(u8, e.err_name, name)) {
+                return e.handler.call(e.handler.ctx, err, failed, q);
+            }
+        }
+        return false;
+    }
+};
+
+// Variant of process that uses router first, then falls back to list handlers
+pub fn processWithRouter(queue: *core.CommandQueue, router: *ExceptionRouter, handlers: []const Handler) void {
+    while (queue.popFront()) |cmd| {
+        cmd.call(cmd.ctx, queue) catch |err| {
+            const used = router.handle(err, cmd, queue);
+            if (!used) {
+                for (handlers) |h| {
+                    if (h.call(h.ctx, err, cmd, queue)) break;
+                }
+            }
+            if (cmd.drop) |d| d(cmd.ctx, queue.allocator);
+            continue;
+        };
+        if (cmd.drop) |d| d(cmd.ctx, queue.allocator);
+    }
 }

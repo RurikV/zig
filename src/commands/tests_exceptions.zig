@@ -179,3 +179,33 @@ test "Exceptions: general log handler enqueues log after failure" {
 
     try testing.expectEqual(@as(usize, 1), buf.lines.items.len);
 }
+
+// Scenario: Router maps (flaky, FlakyFail) to log-only (no retry)
+test "Exceptions: router logs flaky without retry" {
+    t.tprint("Exceptions test: router logs flaky without retry\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var buf = LogBuffer.init(alloc);
+    defer buf.deinit();
+
+    var q = CommandQueue.init(alloc);
+    defer q.deinit();
+
+    var flaky = FlakyCtx{ .fail_times = 1 }; // will fail first time, succeed if retried
+    const make_flaky = CommandFactory(FlakyCtx, core.execFlaky);
+    try q.pushBack(make_flaky.make(&flaky, .flaky));
+
+    var router = handlers.ExceptionRouter.init(alloc);
+    defer router.deinit();
+
+    const err_name = @errorName(core.CommandError.FlakyFail);
+    try router.register(.flaky, err_name, .{ .ctx = &buf, .call = handlerLogAlways });
+
+    const hs = [_]Handler{}; // no fallback handlers; rely solely on router
+    handlers.processWithRouter(&q, &router, hs[0..]);
+
+    try testing.expectEqual(@as(usize, 1), flaky.attempts); // no retry happened
+    try testing.expectEqual(@as(usize, 1), buf.lines.items.len); // one log line
+}
