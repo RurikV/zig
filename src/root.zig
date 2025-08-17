@@ -227,19 +227,20 @@ pub const CommandTag = enum {
 };
 
 pub const CommandQueue = struct {
-    list: std.ArrayList(Command),
+    allocator: Allocator,
+    list: std.ArrayListUnmanaged(Command),
 
     pub fn init(allocator: Allocator) CommandQueue {
-        return .{ .list = std.ArrayList(Command).init(allocator) };
+        return .{ .allocator = allocator, .list = .{} };
     }
     pub fn deinit(self: *CommandQueue) void {
-        self.list.deinit();
+        self.list.deinit(self.allocator);
     }
     pub fn pushBack(self: *CommandQueue, cmd: Command) !void {
-        try self.list.append(cmd);
+        try self.list.append(self.allocator, cmd);
     }
     pub fn pushFront(self: *CommandQueue, cmd: Command) !void {
-        try self.list.insert(0, cmd);
+        try self.list.insert(self.allocator, 0, cmd);
     }
     pub fn popFront(self: *CommandQueue) ?Command {
         if (self.list.items.len == 0) return null;
@@ -276,18 +277,18 @@ fn CommandFactory(comptime T: type, comptime exec: fn (*T, *CommandQueue) anyerr
 
 pub const LogBuffer = struct {
     allocator: Allocator,
-    lines: std.ArrayList([]u8),
+    lines: std.ArrayListUnmanaged([]u8),
 
     pub fn init(allocator: Allocator) LogBuffer {
-        return .{ .allocator = allocator, .lines = std.ArrayList([]u8).init(allocator) };
+        return .{ .allocator = allocator, .lines = .{} };
     }
     pub fn deinit(self: *LogBuffer) void {
         for (self.lines.items) |line| self.allocator.free(line);
-        self.lines.deinit();
+        self.lines.deinit(self.allocator);
     }
     pub fn addLine(self: *LogBuffer, text: []const u8) !void {
         const dup = try self.allocator.dupe(u8, text);
-        try self.lines.append(dup);
+        try self.lines.append(self.allocator, dup);
     }
 };
 
