@@ -210,3 +210,310 @@ test "Rotation: error when orientation cannot be written" {
     try testing.expectError(error.UnwritableOrientation, Rotation.step(&bad));
     tprint("OK: got expected error UnwritableOrientation\n", .{});
 }
+
+
+// ================== Command Queue and Exception Handling Framework ==================
+
+const Allocator = std.mem.Allocator;
+
+pub const CommandError = error{ Boom, FlakyFail };
+
+pub const CommandTag = enum {
+    log,
+    retry_once,
+    retry_twice,
+    flaky,
+    always_fails,
+};
+
+pub const CommandQueue = struct {
+    list: std.ArrayList(Command),
+
+    pub fn init(allocator: Allocator) CommandQueue {
+        return .{ .list = std.ArrayList(Command).init(allocator) };
+    }
+    pub fn deinit(self: *CommandQueue) void {
+        self.list.deinit();
+    }
+    pub fn pushBack(self: *CommandQueue, cmd: Command) !void {
+        try self.list.append(cmd);
+    }
+    pub fn pushFront(self: *CommandQueue, cmd: Command) !void {
+        try self.list.insert(0, cmd);
+    }
+    pub fn popFront(self: *CommandQueue) ?Command {
+        if (self.list.items.len == 0) return null;
+        const cmd = self.list.items[0];
+        _ = self.list.orderedRemove(0);
+        return cmd;
+    }
+    pub fn isEmpty(self: *CommandQueue) bool {
+        return self.list.items.len == 0;
+    }
+};
+
+pub const CommandFn = fn (ctx: *anyopaque, q: *CommandQueue) anyerror!void;
+
+pub const Command = struct {
+    ctx: *anyopaque,
+    call: *const CommandFn,
+    tag: CommandTag,
+};
+
+fn CommandFactory(comptime T: type, comptime exec: fn (*T, *CommandQueue) anyerror!void) type {
+    return struct {
+        fn thunk(raw: *anyopaque, q: *CommandQueue) anyerror!void {
+            const typed: *T = @ptrCast(@alignCast(raw));
+            return exec(typed, q);
+        }
+        pub fn make(ctx: *T, tag: CommandTag) Command {
+            return .{ .ctx = ctx, .call = thunk, .tag = tag };
+        }
+    };
+}
+
+// -------- Log Buffer and LogCommand --------
+
+pub const LogBuffer = struct {
+    allocator: Allocator,
+    lines: std.ArrayList([]u8),
+
+    pub fn init(allocator: Allocator) LogBuffer {
+        return .{ .allocator = allocator, .lines = std.ArrayList([]u8).init(allocator) };
+    }
+    pub fn deinit(self: *LogBuffer) void {
+        for (self.lines.items) |line| self.allocator.free(line);
+        self.lines.deinit();
+    }
+    pub fn addLine(self: *LogBuffer, text: []const u8) !void {
+        const dup = try self.allocator.dupe(u8, text);
+        try self.lines.append(dup);
+    }
+};
+
+pub const LogCtx = struct {
+    buf: *LogBuffer,
+    source: CommandTag,
+    err: anyerror,
+};
+
+fn execLog(ctx: *LogCtx, _: *CommandQueue) !void {
+    var tmp_buf: [128]u8 = undefined;
+    const w = std.fmt.bufPrint(&tmp_buf, "tag={s} err={s}", .{ @tagName(ctx.source), @errorName(ctx.err) }) catch {
+        // Fallback minimal message
+        return ctx.buf.addLine("log")
+            catch {}; // ignore alloc errors in tests
+    };
+    _ = ctx.buf.addLine(w) catch {};
+}
+
+// -------- Test Commands --------
+
+pub const AlwaysFailsCtx = struct { attempts: usize = 0 };
+fn execAlwaysFails(ctx: *AlwaysFailsCtx, _: *CommandQueue) CommandError!void {
+    ctx.attempts += 1;
+    return CommandError.Boom;
+}
+
+pub const FlakyCtx = struct { attempts: usize = 0, fail_times: usize = 1 };
+fn execFlaky(ctx: *FlakyCtx, _: *CommandQueue) CommandError!void {
+    ctx.attempts += 1;
+    if (ctx.attempts <= ctx.fail_times) return CommandError.FlakyFail;
+    return;
+}
+
+// -------- Retry Wrappers --------
+
+pub const RetryOnceCtx = struct { inner: Command };
+fn execRetryOnce(ctx: *RetryOnceCtx, q: *CommandQueue) anyerror!void {
+    return ctx.inner.call(ctx.inner.ctx, q);
+}
+
+pub const RetryTwiceCtx = struct { inner: Command };
+fn execRetryTwice(ctx: *RetryTwiceCtx, q: *CommandQueue) anyerror!void {
+    return ctx.inner.call(ctx.inner.ctx, q);
+}
+
+// -------- Handlers and Processor --------
+
+pub const HandlerFn = fn (buf: ?*LogBuffer, err: anyerror, failed: Command, q: *CommandQueue) bool;
+
+pub const Handler = struct {
+    ctx: ?*LogBuffer,
+    call: *const HandlerFn,
+};
+
+fn process(queue: *CommandQueue, handlers: []const Handler) void {
+    while (queue.popFront()) |cmd| {
+        cmd.call(cmd.ctx, queue) catch |err| {
+            var handled = false;
+            for (handlers) |h| {
+                if (h.call(h.ctx, err, cmd, queue)) { handled = true; break; }
+            }
+            // If not handled, we silently drop the error in this demo framework
+            continue;
+        };
+        // on success, just continue to next command
+    }
+}
+
+// Specific handlers
+
+// Retry on first failure for original commands (not retry/log)
+fn handlerRetryOnFirstFailure(_: ?*LogBuffer, _: anyerror, failed: Command, q: *CommandQueue) bool {
+    switch (failed.tag) {
+        .retry_once, .retry_twice, .log => return false,
+        else => {},
+    }
+    // Enqueue immediate retry-once for the failed command
+    const ctx = std.heap.c_allocator.create(RetryOnceCtx) catch return false;
+    ctx.* = .{ .inner = failed };
+    const maker = CommandFactory(RetryOnceCtx, execRetryOnce);
+    const cmd = maker.make(ctx, .retry_once);
+    q.pushFront(cmd) catch {};
+    return true;
+}
+
+// Log when retry-once fails
+fn handlerLogAfterRetryOnce(hctx: ?*LogBuffer, err: anyerror, failed: Command, q: *CommandQueue) bool {
+    if (failed.tag != .retry_once) return false;
+    const buf = hctx orelse return false;
+    const lctx = std.heap.c_allocator.create(LogCtx) catch return false;
+    lctx.* = .{ .buf = buf, .source = failed.tag, .err = err };
+    const maker = CommandFactory(LogCtx, execLog);
+    q.pushBack(maker.make(lctx, .log)) catch {};
+    return true;
+}
+
+// Second retry when retry-once fails
+fn handlerRetrySecondTime(_: ?*LogBuffer, _: anyerror, failed: Command, q: *CommandQueue) bool {
+    if (failed.tag != .retry_once) return false;
+    const ctx = std.heap.c_allocator.create(RetryTwiceCtx) catch return false;
+    ctx.* = .{ .inner = failed };
+    const maker = CommandFactory(RetryTwiceCtx, execRetryTwice);
+    q.pushFront(maker.make(ctx, .retry_twice)) catch {};
+    return true;
+}
+
+// Log when retry-twice fails
+fn handlerLogAfterSecondRetry(hctx: ?*LogBuffer, err: anyerror, failed: Command, q: *CommandQueue) bool {
+    if (failed.tag != .retry_twice) return false;
+    const buf = hctx orelse return false;
+    const lctx = std.heap.c_allocator.create(LogCtx) catch return false;
+    lctx.* = .{ .buf = buf, .source = failed.tag, .err = err };
+    const maker = CommandFactory(LogCtx, execLog);
+    q.pushBack(maker.make(lctx, .log)) catch {};
+    return true;
+}
+
+// ------------------ Tests for Command/Handlers ------------------
+
+test "Exceptions: LogCommand and Log handler enqueue logging after failure" {
+    tprint("Exceptions test: log after failure\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var buf = LogBuffer.init(alloc);
+    defer buf.deinit();
+
+    var q = CommandQueue.init(alloc);
+    defer q.deinit();
+
+    var af = AlwaysFailsCtx{};
+    const make_af = CommandFactory(AlwaysFailsCtx, execAlwaysFails);
+    try q.pushBack(make_af.make(&af, .always_fails));
+
+    const handlers = [_]Handler{
+        .{ .ctx = null, .call = handlerRetryOnFirstFailure }, // enqueue retry_once
+        .{ .ctx = &buf, .call = handlerLogAfterRetryOnce },
+    };
+
+    process(&q, handlers[0..]);
+
+    // After processing, at least one log line must exist (AlwaysFails -> retry_once -> fails -> log)
+    try testing.expect(buf.lines.items.len >= 1);
+}
+
+test "Exceptions: retry-once strategy succeeds without logging" {
+    tprint("Exceptions test: retry once then success, no log\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var buf = LogBuffer.init(alloc);
+    defer buf.deinit();
+
+    var q = CommandQueue.init(alloc);
+    defer q.deinit();
+
+    var flaky = FlakyCtx{ .fail_times = 1 };
+    const make_flaky = CommandFactory(FlakyCtx, execFlaky);
+    try q.pushBack(make_flaky.make(&flaky, .flaky));
+
+    const handlers = [_]Handler{
+        .{ .ctx = null, .call = handlerRetryOnFirstFailure },
+        .{ .ctx = &buf, .call = handlerLogAfterRetryOnce },
+    };
+
+    process(&q, handlers[0..]);
+
+    try testing.expectEqual(@as(usize, 2), flaky.attempts);
+    try testing.expectEqual(@as(usize, 0), buf.lines.items.len);
+}
+
+test "Exceptions: first fail -> retry, second fail -> log" {
+    tprint("Exceptions test: first fail retry, second fail log\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var buf = LogBuffer.init(alloc);
+    defer buf.deinit();
+
+    var q = CommandQueue.init(alloc);
+    defer q.deinit();
+
+    var flaky = FlakyCtx{ .fail_times = 2 };
+    const make_flaky = CommandFactory(FlakyCtx, execFlaky);
+    try q.pushBack(make_flaky.make(&flaky, .flaky));
+
+    const handlers = [_]Handler{
+        .{ .ctx = null, .call = handlerRetryOnFirstFailure },
+        .{ .ctx = &buf, .call = handlerLogAfterRetryOnce },
+    };
+
+    process(&q, handlers[0..]);
+
+    try testing.expectEqual(@as(usize, 2), flaky.attempts);
+    try testing.expectEqual(@as(usize, 1), buf.lines.items.len);
+}
+
+test "Exceptions: retry twice then log" {
+    tprint("Exceptions test: retry twice then log\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var buf = LogBuffer.init(alloc);
+    defer buf.deinit();
+
+    var q = CommandQueue.init(alloc);
+    defer q.deinit();
+
+    var af = AlwaysFailsCtx{};
+    const make_af = CommandFactory(AlwaysFailsCtx, execAlwaysFails);
+    try q.pushBack(make_af.make(&af, .always_fails));
+
+    const handlers = [_]Handler{
+        .{ .ctx = null, .call = handlerRetryOnFirstFailure },
+        .{ .ctx = null, .call = handlerRetrySecondTime },
+        .{ .ctx = &buf, .call = handlerLogAfterSecondRetry },
+    };
+
+    process(&q, handlers[0..]);
+
+    // attempts: original + retry_once + retry_twice = 3
+    try testing.expectEqual(@as(usize, 3), af.attempts);
+    try testing.expectEqual(@as(usize, 1), buf.lines.items.len);
+}
