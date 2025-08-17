@@ -116,6 +116,10 @@ Artifacts naming (as configured):
 Caching:
 - Uses `~/.cache/zig` and `zig-cache/` keyed by OS, Zig version, and `build.zig.zon` hash.
 
+Code quality:
+- `zig fmt --check` runs in CI to enforce formatting for Zig sources.
+- Qodana is not used for Zig (unsupported); its workflow is manual-only.
+
 Security:
 - Trivy scanner produces SARIF uploaded to GitHub Security tab.
 - Dependabot keeps GitHub Actions up to date.

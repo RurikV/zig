@@ -351,10 +351,40 @@ fn process(queue: *CommandQueue, handlers: []const Handler) void {
             for (handlers) |h| {
                 if (h.call(h.ctx, err, cmd, queue)) { handled = true; break; }
             }
-            // If not handled, we silently drop the error in this demo framework
+            // Free owned contexts for wrapper/log commands even on failure
+            switch (cmd.tag) {
+                .retry_once => {
+                    const p: *RetryOnceCtx = @ptrCast(@alignCast(cmd.ctx));
+                    queue.allocator.destroy(p);
+                },
+                .retry_twice => {
+                    const p: *RetryTwiceCtx = @ptrCast(@alignCast(cmd.ctx));
+                    queue.allocator.destroy(p);
+                },
+                .log => {
+                    const p: *LogCtx = @ptrCast(@alignCast(cmd.ctx));
+                    queue.allocator.destroy(p);
+                },
+                else => {},
+            }
             continue;
         };
-        // on success, just continue to next command
+        // on success, free owned contexts and continue
+        switch (cmd.tag) {
+            .retry_once => {
+                const p: *RetryOnceCtx = @ptrCast(@alignCast(cmd.ctx));
+                queue.allocator.destroy(p);
+            },
+            .retry_twice => {
+                const p: *RetryTwiceCtx = @ptrCast(@alignCast(cmd.ctx));
+                queue.allocator.destroy(p);
+            },
+            .log => {
+                const p: *LogCtx = @ptrCast(@alignCast(cmd.ctx));
+                queue.allocator.destroy(p);
+            },
+            else => {},
+        }
     }
 }
 
@@ -367,7 +397,7 @@ fn handlerRetryOnFirstFailure(_: ?*LogBuffer, _: anyerror, failed: Command, q: *
         else => {},
     }
     // Enqueue immediate retry-once for the failed command
-    const ctx = std.heap.c_allocator.create(RetryOnceCtx) catch return false;
+    const ctx = q.allocator.create(RetryOnceCtx) catch return false;
     ctx.* = .{ .inner = failed };
     const maker = CommandFactory(RetryOnceCtx, execRetryOnce);
     const cmd = maker.make(ctx, .retry_once);
@@ -379,7 +409,7 @@ fn handlerRetryOnFirstFailure(_: ?*LogBuffer, _: anyerror, failed: Command, q: *
 fn handlerLogAfterRetryOnce(hctx: ?*LogBuffer, err: anyerror, failed: Command, q: *CommandQueue) bool {
     if (failed.tag != .retry_once) return false;
     const buf = hctx orelse return false;
-    const lctx = std.heap.c_allocator.create(LogCtx) catch return false;
+    const lctx = q.allocator.create(LogCtx) catch return false;
     lctx.* = .{ .buf = buf, .source = failed.tag, .err = err };
     const maker = CommandFactory(LogCtx, execLog);
     q.pushBack(maker.make(lctx, .log)) catch {};
@@ -389,7 +419,7 @@ fn handlerLogAfterRetryOnce(hctx: ?*LogBuffer, err: anyerror, failed: Command, q
 // Second retry when retry-once fails
 fn handlerRetrySecondTime(_: ?*LogBuffer, _: anyerror, failed: Command, q: *CommandQueue) bool {
     if (failed.tag != .retry_once) return false;
-    const ctx = std.heap.c_allocator.create(RetryTwiceCtx) catch return false;
+    const ctx = q.allocator.create(RetryTwiceCtx) catch return false;
     ctx.* = .{ .inner = failed };
     const maker = CommandFactory(RetryTwiceCtx, execRetryTwice);
     q.pushFront(maker.make(ctx, .retry_twice)) catch {};
@@ -400,7 +430,7 @@ fn handlerRetrySecondTime(_: ?*LogBuffer, _: anyerror, failed: Command, q: *Comm
 fn handlerLogAfterSecondRetry(hctx: ?*LogBuffer, err: anyerror, failed: Command, q: *CommandQueue) bool {
     if (failed.tag != .retry_twice) return false;
     const buf = hctx orelse return false;
-    const lctx = std.heap.c_allocator.create(LogCtx) catch return false;
+    const lctx = q.allocator.create(LogCtx) catch return false;
     lctx.* = .{ .buf = buf, .source = failed.tag, .err = err };
     const maker = CommandFactory(LogCtx, execLog);
     q.pushBack(maker.make(lctx, .log)) catch {};
