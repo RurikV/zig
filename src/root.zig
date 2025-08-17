@@ -2,6 +2,10 @@
 const std = @import("std");
 const testing = std.testing;
 
+fn tprint(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print("[TEST] " ++ fmt, args);
+}
+
 // Basic 2D vector type used for position and velocity
 pub const Vec2 = struct {
     x: f64,
@@ -139,6 +143,7 @@ pub const NoOrientationWriter = struct {
 
 // Movement tests (specified in the assignment)
 test "Movement: (12,5) + (-7,3) -> (5,8)" {
+    tprint("Starting movement test: initial pos=(12,5), vel=(-7,3)\n", .{});
     var ship = GoodShip{
         .pos = .{ .x = 12, .y = 5 },
         .vel = .{ .x = -7, .y = 3 },
@@ -146,28 +151,38 @@ test "Movement: (12,5) + (-7,3) -> (5,8)" {
         .ang_vel = 0,
     };
 
+    tprint("Stepping movement...\n", .{});
     try Movement.step(&ship);
+    tprint("After step pos=({any},{any})\n", .{ ship.pos.x, ship.pos.y });
     try testing.expectEqual(@as(f64, 5), ship.pos.x);
     try testing.expectEqual(@as(f64, 8), ship.pos.y);
+    tprint("OK: movement displacement test passed\n", .{});
 }
 
 test "Movement: error when position cannot be read" {
+    tprint("Starting movement error test: unreadable position\n", .{});
     var bad = NoPositionReader{ .vel = .{ .x = 1, .y = 1 } };
     try testing.expectError(error.UnreadablePosition, Movement.step(&bad));
+    tprint("OK: got expected error UnreadablePosition\n", .{});
 }
 
 test "Movement: error when velocity cannot be read" {
+    tprint("Starting movement error test: unreadable velocity\n", .{});
     var bad = NoVelocityReader{ .pos = .{ .x = 0, .y = 0 } };
     try testing.expectError(error.UnreadableVelocity, Movement.step(&bad));
+    tprint("OK: got expected error UnreadableVelocity\n", .{});
 }
 
 test "Movement: error when position cannot be written" {
+    tprint("Starting movement error test: unwritable position\n", .{});
     var bad = NoPositionWriter{ .pos = .{ .x = 0, .y = 0 }, .vel = .{ .x = 1, .y = 1 } };
     try testing.expectError(error.UnwritablePosition, Movement.step(&bad));
+    tprint("OK: got expected error UnwritablePosition\n", .{});
 }
 
 // Rotation tests
 test "Rotation: angle increases by angular velocity" {
+    tprint("Starting rotation test: angle=30, ang_vel=15\n", .{});
     var ship = GoodShip{
         .pos = .{ .x = 0, .y = 0 },
         .vel = .{ .x = 0, .y = 0 },
@@ -175,16 +190,23 @@ test "Rotation: angle increases by angular velocity" {
         .ang_vel = 15,
     };
 
+    tprint("Stepping rotation...\n", .{});
     try Rotation.step(&ship);
+    tprint("After step angle={any}\n", .{ ship.angle });
     try testing.expectEqual(@as(f64, 45), ship.angle);
+    tprint("OK: rotation increment test passed\n", .{});
 }
 
 test "Rotation: error when orientation cannot be read" {
+    tprint("Starting rotation error test: unreadable orientation\n", .{});
     var bad = NoOrientationReader{ .ang_vel = 5 };
     try testing.expectError(error.UnreadableOrientation, Rotation.step(&bad));
+    tprint("OK: got expected error UnreadableOrientation\n", .{});
 }
 
 test "Rotation: error when orientation cannot be written" {
+    tprint("Starting rotation error test: unwritable orientation\n", .{});
     var bad = NoOrientationWriter{ .angle = 0, .ang_vel = 90 };
     try testing.expectError(error.UnwritableOrientation, Rotation.step(&bad));
+    tprint("OK: got expected error UnwritableOrientation\n", .{});
 }
