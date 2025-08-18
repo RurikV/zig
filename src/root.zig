@@ -16,4 +16,5 @@ pub const commands = struct {
 comptime {
     _ = @import("space/tests_movement_rotation.zig");
     _ = @import("commands/tests_exceptions.zig");
+    _ = @import("commands/tests_macro.zig");
 }
