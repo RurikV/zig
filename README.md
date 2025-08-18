@@ -373,3 +373,54 @@ Notes
 - Multithreaded isolation: each thread has its own current scope; tests show two threads registering different strategies and acting independently.
 - Admin ops are dispatched via a registry (polymorphic, open for extension) so IoC.Resolve and initialization remain closed to modification.
 - See src/commands/tests_ioc.zig for end-to-end examples with [TEST] logs.
+
+## Adapter Generator (Auto-generated Adapters via IoC)
+
+Purpose: replace inheritance-based coupling with adapters that delegate interface operations to IoC strategies. This keeps core closed for modification and open for extension by registering new strategies.
+
+Concept
+- An adapter instance wraps a concrete object pointer (opaque for the adapter) and an interface name, e.g., "Spaceship.Operations.IMovable".
+- Adapter methods call IoC with keys derived from the interface name:
+  - "<iface>:position.get"  args: [ obj_ptr, out_ptr *Vec2 ]
+  - "<iface>:velocity.get"  args: [ obj_ptr, out_ptr *Vec2 ]
+  - "<iface>:position.set"  args: [ obj_ptr, in_ptr  *const Vec2 ]
+  - Optional: "<iface>:finish" args: [ obj_ptr, null ]
+
+Built-in generator
+- Admin op: "Adapter.Spaceship.Operations.IMovable" allocates a MovableAdapter and returns a no-op Command. After executing the command, the out-parameter contains the adapter pointer.
+- You can also register new adapter builders via "Adapter.Register" and use keys prefixed with "Adapter."; IoC.Resolve will dispatch through the adapter registry.
+
+Minimal example (IMovable)
+```zig
+const core = @import("commands/core.zig");
+const IoC = @import("commands/ioc.zig");
+const adapter = @import("commands/adapter.zig");
+
+// 1) Register factories used by the adapter
+const key_pos_get: []const u8 = "Spaceship.Operations.IMovable:position.get";
+const key_vel_get: []const u8 = "Spaceship.Operations.IMovable:velocity.get";
+const key_pos_set: []const u8 = "Spaceship.Operations.IMovable:position.set";
+// factories must obey signatures described above (see src/commands/tests_adapter.zig)
+
+// 2) Create adapter via admin op and call methods
+var ad: *adapter.MovableAdapter = undefined;
+const make_ad = try IoC.Resolve(A, "Adapter.Spaceship.Operations.IMovable", @ptrCast(&ship), @ptrCast(&ad));
+try make_ad.call(make_ad.ctx, &q);
+
+const p = try ad.getPosition();
+try ad.setPosition(.{ .x = 10, .y = 20 });
+```
+
+Registering a new adapter builder at runtime
+```zig
+// Suppose you implemented an AdminFn that builds adapters for interface name IFACE
+const IFACE: []const u8 = "My.Interface";
+const builder: *const IoC.AdminFn = &make_my_interface_adapter;
+try (try IoC.Resolve(A, "Adapter.Register", @ptrCast(&IFACE), @ptrCast(&builder))).call(cmd.ctx, &q);
+
+// Now you can resolve: IoC.Resolve(A, "Adapter.My.Interface", obj_ptr, out_adapter_ptr)
+```
+
+Notes
+- The adapter allocates short-lived keys on the heap for each call and frees them; you own the adapter pointer and must destroy it after use (allocator.destroy(adapter_ptr)).
+- See src/commands/tests_adapter.zig for complete working examples (including optional finish()).
