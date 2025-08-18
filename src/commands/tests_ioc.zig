@@ -58,6 +58,61 @@ fn factory_make_move_twice(allocator: std.mem.Allocator, args: [2]?*anyopaque) a
 
 // ------------- Tests -------------
 
+// 0) Admin registry extensibility: register a new admin op without touching Resolve
+const AdminAliasCtx = struct { name: []const u8 };
+fn execAdminAlias(ctx: *AdminAliasCtx, q: *core.CommandQueue) !void {
+    const inner = try IoC.Resolve(q.allocator, "Scopes.New", @ptrCast(@constCast(&ctx.name)), null);
+    defer if (inner.drop) |d| d(inner.ctx, q.allocator);
+    try inner.call(inner.ctx, q);
+}
+fn admin_new_scope_alias(allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command {
+    const pname: *const []const u8 = @ptrCast(@alignCast(args[0] orelse return error.Invalid));
+    const Maker = core.CommandFactory(AdminAliasCtx, execAdminAlias);
+    const c = try allocator.create(AdminAliasCtx);
+    c.* = .{ .name = pname.* };
+    return Maker.makeOwned(c, .flaky, false, false);
+}
+
+test "IoC: admin registry allows adding new admin op key" {
+    t.tprint("IoC test: admin add new op via IoC.Admin.Register\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const A = gpa.allocator();
+    var q = core.CommandQueue.init(A);
+    defer q.deinit();
+
+    // Register new admin alias key for Scopes.New
+    const alias: []const u8 = "Scopes.New2";
+    const fnptr: *const IoC.AdminFn = &admin_new_scope_alias;
+    const reg = try IoC.Resolve(A, "IoC.Admin.Register", @ptrCast(@constCast(&alias)), @ptrCast(@constCast(&fnptr)));
+    defer if (reg.drop) |d| d(reg.ctx, A);
+    try reg.call(reg.ctx, &q);
+
+    // Use the new admin key to create a scope and set current
+    const sname: []const u8 = "C";
+    const cnew = try IoC.Resolve(A, "Scopes.New2", @ptrCast(@constCast(&sname)), null);
+    defer if (cnew.drop) |d| d(cnew.ctx, A);
+    try cnew.call(cnew.ctx, &q);
+
+    const set = try IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&sname)), null);
+    defer if (set.drop) |d| d(set.ctx, A);
+    try set.call(set.ctx, &q);
+
+    // Register domain factory and use in new scope
+    const key: []const u8 = "move";
+    const fptr: *const IoC.FactoryFn = &factory_make_move;
+    const regd = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key)), @ptrCast(@constCast(&fptr)));
+    defer if (regd.drop) |d| d(regd.ctx, A);
+    try regd.call(regd.ctx, &q);
+
+    var ship = fixtures.GoodShip{ .pos = .{ .x = 0, .y = 0 }, .vel = .{ .x = 2, .y = 3 }, .angle = 0, .ang_vel = 0 };
+    const cmd = try IoC.Resolve(A, "move", @ptrCast(&ship), null);
+    defer if (cmd.drop) |d| d(cmd.ctx, A);
+    try cmd.call(cmd.ctx, &q);
+    try testing.expectEqual(@as(f64, 2), ship.pos.x);
+    try testing.expectEqual(@as(f64, 3), ship.pos.y);
+}
+
 // 1) Registration and simple resolve: move once
 test "IoC: register and resolve move command in default scope" {
     t.tprint("IoC test: register/resolve in root scope\n", .{});
