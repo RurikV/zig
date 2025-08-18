@@ -111,7 +111,6 @@ pub fn execChangeVelocity(comptime T: type, ctx: *ChangeVelCtx(T), _: *core.Comm
     try ctx.obj.setVelocity(.{ .x = nx, .y = ny });
 }
 
-
 // --------------- Bridge, NoOp, and Repeater Commands -----------------
 // Bridge: delegates to a dynamically swappable inner command.
 pub const BridgeCtx = struct {
