@@ -110,3 +110,29 @@ pub fn execChangeVelocity(comptime T: type, ctx: *ChangeVelCtx(T), _: *core.Comm
     const ny = v.x * sin_a + v.y * cos_a;
     try ctx.obj.setVelocity(.{ .x = nx, .y = ny });
 }
+
+
+// --------------- Bridge, NoOp, and Repeater Commands -----------------
+// Bridge: delegates to a dynamically swappable inner command.
+pub const BridgeCtx = struct {
+    inner: core.Command,
+};
+
+pub fn execBridge(ctx: *BridgeCtx, q: *core.CommandQueue) anyerror!void {
+    // Delegate to current inner
+    try ctx.inner.call(ctx.inner.ctx, q);
+}
+
+// NoOp: does nothing
+pub const NoOpCtx = struct {};
+pub fn execNoOp(_: *NoOpCtx, _: *core.CommandQueue) anyerror!void {
+    // intentionally empty
+    return;
+}
+
+// Repeater: re-enqueues the target command back to the queue (front) for continuous behavior.
+pub const RepeaterCtx = struct { target: core.Command };
+pub fn execRepeater(ctx: *RepeaterCtx, q: *core.CommandQueue) anyerror!void {
+    // Place at front so that repetition is immediate; can be changed to pushBack for different cadence
+    try q.pushFront(ctx.target);
+}

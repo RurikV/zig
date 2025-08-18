@@ -268,3 +268,78 @@ test "Macro: ChangeVelocity no-op for rotator without velocity" {
 
     try testing.expectApproxEqAbs(std.math.pi / 4.0, turret.angle, 1e-9);
 }
+
+
+// 7) Bridge + Repeater: continuous execution and cancellation via NoOp injection
+const CounterCtx = struct { n: *u32 };
+fn execCounter(ctx: *CounterCtx, _: *core.CommandQueue) !void {
+    ctx.n.* += 1;
+}
+
+fn execBridge_T(ctx: *macro.BridgeCtx, q: *core.CommandQueue) anyerror!void { return macro.execBridge(ctx, q); }
+fn execNoOp_T(ctx: *macro.NoOpCtx, q: *core.CommandQueue) anyerror!void { return macro.execNoOp(ctx, q); }
+fn execRepeater_T(ctx: *macro.RepeaterCtx, q: *core.CommandQueue) anyerror!void { return macro.execRepeater(ctx, q); }
+
+test "Macro: Bridge+Repeater repeats then stops after NoOp inject" {
+    t.tprint("Macro test: Bridge+Repeater repeats then stops after NoOp inject\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){}; defer _ = gpa.deinit();
+    const A = gpa.allocator();
+
+    // Counter command
+    var count: u32 = 0;
+    const make_counter = CommandFactory(CounterCtx, execCounter);
+    var cctx = CounterCtx{ .n = &count };
+    const counter_cmd = make_counter.make(&cctx, .flaky);
+
+    // Placeholder NoOp
+    const make_noop = CommandFactory(macro.NoOpCtx, execNoOp_T);
+    var noop_ctx = macro.NoOpCtx{};
+    const noop_cmd = make_noop.make(&noop_ctx, .flaky);
+
+    // Bridge wrapping a macro; we will fill its inner after creating macro items
+    const make_bridge = CommandFactory(macro.BridgeCtx, execBridge_T);
+    var bridge_ctx = macro.BridgeCtx{ .inner = noop_cmd }; // temp
+    const bridge_cmd = make_bridge.make(&bridge_ctx, .flaky);
+
+    // Repeater that re-enqueues the bridge itself
+    const make_rep = CommandFactory(macro.RepeaterCtx, execRepeater_T);
+    var rep_ctx = macro.RepeaterCtx{ .target = bridge_cmd };
+    const rep_cmd = make_rep.make(&rep_ctx, .retry_once);
+
+    // Macro [counter, repeater]
+    const make_macro = CommandFactory(macro.MacroCtx, macro.execMacro);
+    var items = [_]core.Command{ counter_cmd, rep_cmd };
+    var mctx = macro.MacroCtx{ .items = items[0..] };
+    const mcmd = make_macro.make(&mctx, .flaky);
+
+    // Now set bridge to delegate to macro
+    bridge_ctx.inner = mcmd;
+
+    var q = core.CommandQueue.init(A); defer q.deinit();
+
+    // Seed the queue with the bridge
+    try q.pushBack(bridge_cmd);
+
+    // Process a few steps manually (no errors expected)
+    var steps: u32 = 0;
+    while (steps < 3) : (steps += 1) {
+        if (q.popFront()) |cmd| {
+            try cmd.call(cmd.ctx, &q);
+        } else break;
+    }
+
+    try testing.expectEqual(@as(u32, 3), count);
+
+    // Inject NoOp by swapping bridge's inner
+    bridge_ctx.inner = noop_cmd;
+
+    // Run a couple more steps; counter should not increase
+    steps = 0;
+    while (steps < 2) : (steps += 1) {
+        if (q.popFront()) |cmd| {
+            try cmd.call(cmd.ctx, &q);
+        } else break;
+    }
+
+    try testing.expectEqual(@as(u32, 3), count);
+}
