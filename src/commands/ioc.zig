@@ -95,6 +95,8 @@ fn ensure() void {
     registerAdminBuiltin("Scopes.New", &opScopesNew);
     registerAdminBuiltin("Scopes.Current", &opScopesCurrent);
     registerAdminBuiltin("IoC.Admin.Register", &opAdminRegister);
+    // Adapter generator admin ops
+    registerAdminBuiltin("Adapter.Spaceship.Operations.IMovable", &opAdapterMovable);
     initialized = true;
 }
 
@@ -234,6 +236,26 @@ fn opAdminRegister(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Com
     ctx.* = .{ .key = pkey.*, .func = pfunc.* };
     const Maker = core.CommandFactory(CmdAdminRegisterCtx, execAdminRegister);
     return Maker.makeOwned(ctx, .flaky, false, false);
+}
+
+// ---- Adapter admin operations ----
+const Adapter = @import("adapter.zig");
+const NoopCtx = struct {};
+fn execNoop(_: *NoopCtx, _: *core.CommandQueue) !void {
+    return;
+}
+
+fn opAdapterMovable(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Command {
+    const pobj: *anyopaque = args[0] orelse return error.Invalid;
+    const pout: **Adapter.MovableAdapter = @ptrCast(@alignCast(args[1] orelse return error.Invalid));
+    // allocate adapter
+    const adapter = try allocator.create(Adapter.MovableAdapter);
+    adapter.* = Adapter.MovableAdapter.init(allocator, "Spaceship.Operations.IMovable", pobj);
+    pout.* = adapter;
+    const Maker = core.CommandFactory(NoopCtx, execNoop);
+    const c = try allocator.create(NoopCtx);
+    c.* = .{};
+    return Maker.makeOwned(c, .flaky, false, false);
 }
 
 // -------------- Resolve API --------------
