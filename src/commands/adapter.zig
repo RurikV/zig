@@ -22,18 +22,17 @@ pub const MovableAdapter = struct {
         return .{ .allocator = allocator, .iface = iface, .obj = obj };
     }
 
-    fn makeKey(self: *MovableAdapter, comptime suffix: []const u8) []const u8 {
-        // Compose key into a small temp buffer on the stack; lifetime valid for Resolve call
-        var buf: [256]u8 = undefined;
-        const key = std.fmt.bufPrint(&buf, "{s}:{s}", .{ self.iface, suffix }) catch suffix; // fallback
-        return key;
+    fn makeKey(self: *MovableAdapter, comptime suffix: []const u8) ![]u8 {
+        // Allocate a key string "<iface>:<suffix>" owned by self.allocator; caller must free.
+        return std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ self.iface, suffix });
     }
 
     pub fn getPosition(self: *MovableAdapter) !vec.Vec2 {
         var out_val: vec.Vec2 = .{ .x = 0, .y = 0 };
         var q = core.CommandQueue.init(self.allocator);
         defer q.deinit();
-        const key = self.makeKey("position.get");
+        const key = try self.makeKey("position.get");
+        defer self.allocator.free(key);
         const cmd = try IoC.Resolve(self.allocator, key, self.obj, @ptrCast(&out_val));
         defer if (cmd.drop) |d| d(cmd.ctx, self.allocator);
         try cmd.call(cmd.ctx, &q);
@@ -44,7 +43,8 @@ pub const MovableAdapter = struct {
         var out_val: vec.Vec2 = .{ .x = 0, .y = 0 };
         var q = core.CommandQueue.init(self.allocator);
         defer q.deinit();
-        const key = self.makeKey("velocity.get");
+        const key = try self.makeKey("velocity.get");
+        defer self.allocator.free(key);
         const cmd = try IoC.Resolve(self.allocator, key, self.obj, @ptrCast(&out_val));
         defer if (cmd.drop) |d| d(cmd.ctx, self.allocator);
         try cmd.call(cmd.ctx, &q);
@@ -54,7 +54,8 @@ pub const MovableAdapter = struct {
     pub fn setPosition(self: *MovableAdapter, new_pos: vec.Vec2) !void {
         var q = core.CommandQueue.init(self.allocator);
         defer q.deinit();
-        const key = self.makeKey("position.set");
+        const key = try self.makeKey("position.set");
+        defer self.allocator.free(key);
         var tmp = new_pos; // pass pointer to value
         const cmd = try IoC.Resolve(self.allocator, key, self.obj, @ptrCast(&tmp));
         defer if (cmd.drop) |d| d(cmd.ctx, self.allocator);
@@ -65,7 +66,8 @@ pub const MovableAdapter = struct {
         // Optional extension method per task 3*
         var q = core.CommandQueue.init(self.allocator);
         defer q.deinit();
-        const key = self.makeKey("finish");
+        const key = try self.makeKey("finish");
+        defer self.allocator.free(key);
         const cmd = try IoC.Resolve(self.allocator, key, self.obj, null);
         defer if (cmd.drop) |d| d(cmd.ctx, self.allocator);
         try cmd.call(cmd.ctx, &q);
