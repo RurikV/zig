@@ -23,7 +23,6 @@ const core = @import("core.zig");
 pub const FactoryFn = fn (allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command;
 pub const AdminFn = fn (allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command;
 
-
 const Allocator = std.mem.Allocator;
 const ThreadId = usize;
 
