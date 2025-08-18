@@ -23,6 +23,7 @@ const core = @import("core.zig");
 pub const FactoryFn = fn (allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command;
 pub const AdminFn = fn (allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command;
 
+
 const Allocator = std.mem.Allocator;
 const ThreadId = usize;
 
@@ -90,24 +91,24 @@ fn ensure() void {
     // create default root scope
     const s = Scope{};
     _ = state.scopes.put(state.allocator, "root", s) catch {};
-    // init admin ops registry with built-ins
-    if (dupKey("IoC.Register")) |k| {
-        _ = state.admin_ops.put(state.allocator, k, &opIoCRegister) catch {};
-    }
-    if (dupKey("Scopes.New")) |k| {
-        _ = state.admin_ops.put(state.allocator, k, &opScopesNew) catch {};
-    }
-    if (dupKey("Scopes.Current")) |k| {
-        _ = state.admin_ops.put(state.allocator, k, &opScopesCurrent) catch {};
-    }
-    if (dupKey("IoC.Admin.Register")) |k| {
-        _ = state.admin_ops.put(state.allocator, k, &opAdminRegister) catch {};
-    }
+    // init admin ops registry with built-ins (no branching)
+    registerAdminBuiltin("IoC.Register", &opIoCRegister);
+    registerAdminBuiltin("Scopes.New", &opScopesNew);
+    registerAdminBuiltin("Scopes.Current", &opScopesCurrent);
+    registerAdminBuiltin("IoC.Admin.Register", &opAdminRegister);
     initialized = true;
 }
 
 fn dupKey(s: []const u8) ?[]u8 {
     return state.allocator.dupe(u8, s) catch null;
+}
+
+fn registerAdminBuiltin(key: []const u8, fnptr: *const AdminFn) void {
+    const dup = state.allocator.dupe(u8, key) catch return;
+    _ = state.admin_ops.put(state.allocator, dup, fnptr) catch {
+        state.allocator.free(dup);
+        return;
+    };
 }
 
 fn getThreadId() ThreadId {

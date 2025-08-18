@@ -58,6 +58,39 @@ fn factory_make_move_twice(allocator: std.mem.Allocator, args: [2]?*anyopaque) a
 
 // ------------- Tests -------------
 
+// Built-in admin ops should be available out of the box
+test "IoC: built-in admin ops are registered in registry" {
+    t.tprint("IoC test: built-in admin ops available via registry\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const A = gpa.allocator();
+    var q = core.CommandQueue.init(A);
+    defer q.deinit();
+
+    const scope: []const u8 = "Z";
+    const cnew = try IoC.Resolve(A, "Scopes.New", @ptrCast(@constCast(&scope)), null);
+    defer if (cnew.drop) |d| d(cnew.ctx, A);
+    try cnew.call(cnew.ctx, &q);
+
+    const cset = try IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&scope)), null);
+    defer if (cset.drop) |d| d(cset.ctx, A);
+    try cset.call(cset.ctx, &q);
+
+    const key: []const u8 = "mv";
+    const fptr: *const IoC.FactoryFn = &factory_make_move;
+    const creg = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key)), @ptrCast(@constCast(&fptr)));
+    defer if (creg.drop) |d| d(creg.ctx, A);
+    try creg.call(creg.ctx, &q);
+
+    var ship = fixtures.GoodShip{ .pos = .{ .x = 1, .y = 1 }, .vel = .{ .x = 2, .y = 3 }, .angle = 0, .ang_vel = 0 };
+    const cmd = try IoC.Resolve(A, key, @ptrCast(&ship), null);
+    defer if (cmd.drop) |d| d(cmd.ctx, A);
+    try cmd.call(cmd.ctx, &q);
+
+    try testing.expectEqual(@as(f64, 3), ship.pos.x);
+    try testing.expectEqual(@as(f64, 4), ship.pos.y);
+}
+
 // 0) Admin registry extensibility: register a new admin op without touching Resolve
 const AdminAliasCtx = struct { name: []const u8 };
 fn execAdminAlias(ctx: *AdminAliasCtx, q: *core.CommandQueue) !void {
