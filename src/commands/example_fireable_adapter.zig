@@ -79,8 +79,13 @@ pub const FireableAdapter = struct {
 // Optional: a ready-to-use AdminFn builder you can register via Adapter.Register
 // After registering with IFACE = "Weapons.IFireable", you can resolve
 //   IoC.Resolve(A, "Adapter.Weapons.IFireable", obj_ptr, &out_ptr)
-pub const FireableAdapterBuilderCtx = struct { obj: *anyopaque, out: **FireableAdapter };
-fn execNoop(_: *FireableAdapterBuilderCtx, _: *core.CommandQueue) !void { return; }
+pub const FireableAdapterBuilderCtx = struct {
+    obj: *anyopaque,
+    out: **FireableAdapter,
+};
+fn execNoop(_: *FireableAdapterBuilderCtx, _: *core.CommandQueue) !void {
+    return;
+}
 
 pub fn admin_make_fireable_adapter(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Command {
     const pobj: *anyopaque = args[0] orelse return error.Invalid;
