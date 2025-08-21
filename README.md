@@ -424,3 +424,45 @@ try (try IoC.Resolve(A, "Adapter.Register", @ptrCast(&IFACE), @ptrCast(&builder)
 Notes
 - The adapter allocates short-lived keys on the heap for each call and frees them; you own the adapter pointer and must destroy it after use (allocator.destroy(adapter_ptr)).
 - See src/commands/tests_adapter.zig for complete working examples (including optional finish()).
+
+Scaffold example: custom interface "Weapons.IFireable"
+
+1) Implement an adapter type that delegates to IoC (already provided):
+   - src/commands/example_fireable_adapter.zig defines FireableAdapter with methods:
+     - getAmmo() !u32  -> IoC key "<iface>:ammo.get"
+     - fire() !void    -> IoC key "<iface>:fire"
+     - reload(u32)     -> IoC key "<iface>:reload"
+
+2) Register a builder AdminFn for your interface at runtime:
+```zig
+const IoC = @import("commands/ioc.zig");
+const example = @import("commands/example_fireable_adapter.zig");
+
+var q = core.CommandQueue.init(A);
+const IFACE: []const u8 = "Weapons.IFireable";
+const builder: *const IoC.AdminFn = &example.admin_make_fireable_adapter;
+try (try IoC.Resolve(A, "Adapter.Register", @ptrCast(@constCast(&IFACE)), @ptrCast(@constCast(&builder)))).call(cmd.ctx, &q);
+```
+
+3) Register factories for your methods (per scope as needed):
+```zig
+const key_ammo_get: []const u8 = "Weapons.IFireable:ammo.get";
+const key_fire: []const u8     = "Weapons.IFireable:fire";
+const key_reload: []const u8   = "Weapons.IFireable:reload";
+const FAmmoGet: *const IoC.FactoryFn = &my_factory_ammo_get;  // (obj, *u32)
+const FFire: *const IoC.FactoryFn    = &my_factory_fire;      // (obj, null)
+const FReload: *const IoC.FactoryFn  = &my_factory_reload;    // (obj, *const u32)
+try (try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_ammo_get)), @ptrCast(@constCast(&FAmmoGet)))).call(cmd.ctx, &q);
+try (try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_fire)), @ptrCast(@constCast(&FFire)))).call(cmd.ctx, &q);
+try (try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_reload)), @ptrCast(@constCast(&FReload)))).call(cmd.ctx, &q);
+```
+
+4) Create and use the adapter:
+```zig
+var fireable: *example.FireableAdapter = undefined;
+try (try IoC.Resolve(A, "Adapter.Weapons.IFireable", obj_ptr, @ptrCast(&fireable))).call(cmd.ctx, &q);
+const ammo = try fireable.getAmmo();
+try fireable.fire();
+try fireable.reload(10);
+A.destroy(fireable);
+```
