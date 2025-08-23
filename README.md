@@ -192,3 +192,90 @@ pub fn demo(alloc: std.mem.Allocator) !void {
 Tests cover both strategies (first fail → retry → log; retry twice → log) under `src/commands/tests_exceptions.zig`. Run them with `zig build test`.
 
 
+
+
+## Macro Commands (Fuel, Rotation, Bridge/Repeater)
+
+MacroCommand lets you compose several commands into one atomic operation that runs sub-commands sequentially and stops at the first failure (propagating an error). This enables extending behavior (per SOLID) by composing commands rather than modifying existing code.
+
+Implemented building blocks in src/commands/macro.zig:
+- MacroCtx + execMacro: sequential executor for a slice of commands.
+- Fuel commands:
+  - CheckFuelCommand: verifies fuel >= consumption, otherwise returns GameError.CommandException.
+  - BurnFuelCommand: reduces fuel by the consumption rate.
+- MoveCommand/RotateCommand wrappers: expose Movement/Rotation as Commands.
+- ChangeVelocityCommand: rotates the instantaneous velocity vector by the same delta used in rotation. No-op for objects without velocity API.
+- Bridge, NoOp, Repeater:
+  - Bridge: delegates to a swappable inner command at runtime.
+  - NoOp: does nothing; used to cancel/cut behavior.
+  - Repeater: re-enqueues a target command to the queue for continuous execution.
+
+Examples
+
+1) Movement with fuel consumption (Check → Move → Burn):
+```zig
+const core = @import("commands/core.zig");
+const macro = @import("commands/macro.zig");
+
+// Define concrete thunks for your object type T
+fn execCheckFuel_T(ctx: *macro.CheckFuelCtx(T), q: *core.CommandQueue) !void {
+    return macro.execCheckFuel(T, ctx, q);
+}
+fn execMove_T(ctx: *macro.MoveCtx(T), q: *core.CommandQueue) !void {
+    return macro.execMove(T, ctx, q);
+}
+fn execBurnFuel_T(ctx: *macro.BurnFuelCtx(T), q: *core.CommandQueue) !void {
+    return macro.execBurnFuel(T, ctx, q);
+}
+
+pub fn moveWithFuel(alloc: std.mem.Allocator, obj: *T) !void {
+    var q = core.CommandQueue.init(alloc);
+    defer q.deinit();
+
+    const MakeCheck = core.CommandFactory(macro.CheckFuelCtx(T), execCheckFuel_T);
+    const MakeMove  = core.CommandFactory(macro.MoveCtx(T),       execMove_T);
+    const MakeBurn  = core.CommandFactory(macro.BurnFuelCtx(T),   execBurnFuel_T);
+
+    var c1 = macro.CheckFuelCtx(T){ .obj = obj };
+    var c2 = macro.MoveCtx(T){ .obj = obj };
+    var c3 = macro.BurnFuelCtx(T){ .obj = obj };
+
+    const items = [_]core.Command{ MakeCheck.make(&c1, .flaky), MakeMove.make(&c2, .flaky), MakeBurn.make(&c3, .flaky) };
+
+    var mctx = macro.MacroCtx{ .items = items[0..] };
+    const MakeMacro = core.CommandFactory(macro.MacroCtx, macro.execMacro);
+    const mcmd = MakeMacro.make(&mctx, .flaky);
+    try mcmd.call(mcmd.ctx, &q);
+}
+```
+
+2) Rotation that also changes velocity (Rotate → ChangeVelocity):
+```zig
+fn execRotate_T(ctx: *macro.RotateCtx(T), q: *core.CommandQueue) !void { return macro.execRotate(T, ctx, q); }
+fn execChangeVel_T(ctx: *macro.ChangeVelCtx(T), q: *core.CommandQueue) !void { return macro.execChangeVelocity(T, ctx, q); }
+
+var rctx = macro.RotateCtx(T){ .obj = obj };
+var vctx = macro.ChangeVelCtx(T){ .obj = obj };
+const seq = [_]core.Command{ MakeRot.make(&rctx, .flaky), MakeChv.make(&vctx, .flaky) };
+var mctx = macro.MacroCtx{ .items = seq[0..] };
+// Execute as above via execMacro
+```
+
+3) Continuous execution with cancellation (Bridge + Repeater):
+- Bridge wraps a macro (or any command) and delegates to it on each execution.
+- Repeater puts the Bridge back into the queue front to keep repeating.
+- To stop, swap Bridge.inner to NoOp (no search/removal in the queue needed).
+
+See the passing tests in src/commands/tests_macro.zig:
+- Macro: CheckFuelCommand success/failure
+- Macro: BurnFuelCommand reduces fuel
+- Macro: MacroCommand aborts on first failure
+- Macro: movement with fuel consumption
+- Macro: ChangeVelocity rotates velocity and rotation macro
+- Macro: ChangeVelocity no-op for object without velocity
+- Macro: Bridge+Repeater repeats then stops after NoOp inject
+
+Additional Modules
+
+- src/commands/macro.zig — Macro/utility commands (fuel, velocity change, bridge/repeater) and game-level error.
+- src/commands/tests_macro.zig — Macro and fuel/velocity tests with [TEST] logs.
