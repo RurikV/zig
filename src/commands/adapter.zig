@@ -1,5 +1,4 @@
 const std = @import("std");
-const vec = @import("../space/vector.zig");
 const core = @import("core.zig");
 const IoC = @import("ioc.zig");
 
@@ -14,91 +13,62 @@ const Allocator = std.mem.Allocator;
 // Optional (for task 3*):
 //   "<iface>:finish"        args: [ obj_ptr, null ]
 
-// Generic interface adapter generator.
-// Usage: provide an interface name IFACE and a Spec type that exposes
-//   pub fn Methods(comptime Self: type) type { return struct { /* methods */ }; }
-// The returned struct will include all methods declared by Spec.Methods(Self)
-// and provide IoC helper calls: callOut, callIn, callNoArg.
+// --------------- Base Adapter (common helpers) ---------------
+// Provides common helper functions (init/makeKey/call*) parametrized by IFACE and Self.
+// Usage inside a Spec.Adapter(IFACE):
+//   return struct {
+//       allocator: std.mem.Allocator,
+//       obj: *anyopaque,
+//       const Self = @This();
+//       usingnamespace adapter.BaseMethods(IFACE, Self);
+//       // ... interface-specific methods ...
+//   };
+// Base helpers as free functions (can be used by any Spec without mixins)
+pub fn BaseInit(comptime IFACE: []const u8, comptime Self: type, allocator: std.mem.Allocator, iface: []const u8, obj: *anyopaque) Self {
+    _ = IFACE;
+    _ = iface; // fixed at comptime by IFACE
+    return .{ .allocator = allocator, .obj = obj };
+}
+
+pub fn BaseMakeKey(comptime IFACE: []const u8, allocator: std.mem.Allocator, comptime suffix: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}:{s}", .{ IFACE, suffix });
+}
+
+pub fn BaseCallOut(comptime IFACE: []const u8, allocator: std.mem.Allocator, obj: *anyopaque, comptime suffix: []const u8, out_ptr: anytype) !void {
+    var q = core.CommandQueue.init(allocator);
+    defer q.deinit();
+    const key = try BaseMakeKey(IFACE, allocator, suffix);
+    defer allocator.free(key);
+    const cmd = try IoC.Resolve(allocator, key, obj, @ptrCast(out_ptr));
+    defer if (cmd.drop) |d| d(cmd.ctx, allocator);
+    try cmd.call(cmd.ctx, &q);
+}
+
+pub fn BaseCallIn(comptime IFACE: []const u8, allocator: std.mem.Allocator, obj: *anyopaque, comptime suffix: []const u8, in_ptr: anytype) !void {
+    var q = core.CommandQueue.init(allocator);
+    defer q.deinit();
+    const key = try BaseMakeKey(IFACE, allocator, suffix);
+    defer allocator.free(key);
+    const cmd = try IoC.Resolve(allocator, key, obj, @ptrCast(in_ptr));
+    defer if (cmd.drop) |d| d(cmd.ctx, allocator);
+    try cmd.call(cmd.ctx, &q);
+}
+
+pub fn BaseCallNoArg(comptime IFACE: []const u8, allocator: std.mem.Allocator, obj: *anyopaque, comptime suffix: []const u8) !void {
+    var q = core.CommandQueue.init(allocator);
+    defer q.deinit();
+    const key = try BaseMakeKey(IFACE, allocator, suffix);
+    defer allocator.free(key);
+    const cmd = try IoC.Resolve(allocator, key, obj, null);
+    defer if (cmd.drop) |d| d(cmd.ctx, allocator);
+    try cmd.call(cmd.ctx, &q);
+}
+
+// --------------- Generic interface adapter generator ---------------
+// Delegates type definition entirely to Spec.
+// Spec must expose: pub fn Adapter(comptime IFACE: []const u8) type { /* returns a type with init and methods */ }
 pub fn InterfaceAdapter(comptime IFACE: []const u8, comptime Spec: type) type {
-    _ = Spec;
-    return struct {
-        allocator: Allocator,
-        obj: *anyopaque,
-
-        const Self = @This();
-
-        pub fn init(allocator: Allocator, iface: []const u8, obj: *anyopaque) Self {
-            _ = iface; // fixed at comptime by IFACE
-            return .{ .allocator = allocator, .obj = obj };
-        }
-
-        fn makeKey(self: *Self, comptime suffix: []const u8) ![]u8 {
-            return std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ IFACE, suffix });
-        }
-
-        pub inline fn callOut(self: *Self, comptime suffix: []const u8, out_ptr: anytype) !void {
-            var q = core.CommandQueue.init(self.allocator);
-            defer q.deinit();
-            const key = try self.makeKey(suffix);
-            defer self.allocator.free(key);
-            const cmd = try IoC.Resolve(self.allocator, key, self.obj, @ptrCast(out_ptr));
-            defer if (cmd.drop) |d| d(cmd.ctx, self.allocator);
-            try cmd.call(cmd.ctx, &q);
-        }
-
-        pub inline fn callIn(self: *Self, comptime suffix: []const u8, in_ptr: anytype) !void {
-            var q = core.CommandQueue.init(self.allocator);
-            defer q.deinit();
-            const key = try self.makeKey(suffix);
-            defer self.allocator.free(key);
-            const cmd = try IoC.Resolve(self.allocator, key, self.obj, @ptrCast(in_ptr));
-            defer if (cmd.drop) |d| d(cmd.ctx, self.allocator);
-            try cmd.call(cmd.ctx, &q);
-        }
-
-        pub inline fn callNoArg(self: *Self, comptime suffix: []const u8) !void {
-            var q = core.CommandQueue.init(self.allocator);
-            defer q.deinit();
-            const key = try self.makeKey(suffix);
-            defer self.allocator.free(key);
-            const cmd = try IoC.Resolve(self.allocator, key, self.obj, null);
-            defer if (cmd.drop) |d| d(cmd.ctx, self.allocator);
-            try cmd.call(cmd.ctx, &q);
-        }
-
-        // Default generic methods (exposed regardless of Spec) for common patterns
-        // Movable-like
-        pub fn getPosition(self: *Self) !vec.Vec2 {
-            var out_val: vec.Vec2 = .{ .x = 0, .y = 0 };
-            try self.callOut("position.get", &out_val);
-            return out_val;
-        }
-        pub fn getVelocity(self: *Self) !vec.Vec2 {
-            var out_val: vec.Vec2 = .{ .x = 0, .y = 0 };
-            try self.callOut("velocity.get", &out_val);
-            return out_val;
-        }
-        pub fn setPosition(self: *Self, new_pos: vec.Vec2) !void {
-            var tmp = new_pos;
-            try self.callIn("position.set", &tmp);
-        }
-        pub fn finish(self: *Self) !void {
-            try self.callNoArg("finish");
-        }
-        // Fireable-like
-        pub fn getAmmo(self: *Self) !u32 {
-            var out_val: u32 = 0;
-            try self.callOut("ammo.get", &out_val);
-            return out_val;
-        }
-        pub fn fire(self: *Self) !void {
-            try self.callNoArg("fire");
-        }
-        pub fn reload(self: *Self, amount: u32) !void {
-            var tmp = amount;
-            try self.callIn("reload", &tmp);
-        }
-    };
+    return Spec.Adapter(IFACE);
 }
 
 // ---------------- Generic Adapter Builder Generator ----------------

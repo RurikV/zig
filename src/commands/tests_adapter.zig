@@ -12,24 +12,32 @@ const Vec2 = vec.Vec2;
 
 // Define Movable interface Spec and generate adapter types via InterfaceAdapter
 const MovableSpec = struct {
-    pub fn Methods(comptime Self: type) type {
+    pub fn Adapter(comptime IFACE: []const u8) type {
         return struct {
+            allocator: std.mem.Allocator,
+            obj: *anyopaque,
+            const Self = @This();
+
+            pub fn init(allocator: std.mem.Allocator, iface: []const u8, obj: *anyopaque) Self {
+                return adapter.BaseInit(IFACE, Self, allocator, iface, obj);
+            }
+
             pub fn getPosition(self: *Self) !Vec2 {
                 var out_val: Vec2 = .{ .x = 0, .y = 0 };
-                try self.callOut("position.get", &out_val);
+                try adapter.BaseCallOut(IFACE, self.allocator, self.obj, "position.get", &out_val);
                 return out_val;
             }
             pub fn getVelocity(self: *Self) !Vec2 {
                 var out_val: Vec2 = .{ .x = 0, .y = 0 };
-                try self.callOut("velocity.get", &out_val);
+                try adapter.BaseCallOut(IFACE, self.allocator, self.obj, "velocity.get", &out_val);
                 return out_val;
             }
             pub fn setPosition(self: *Self, new_pos: Vec2) !void {
                 var tmp = new_pos;
-                try self.callIn("position.set", &tmp);
+                try adapter.BaseCallIn(IFACE, self.allocator, self.obj, "position.set", &tmp);
             }
             pub fn finish(self: *Self) !void {
-                try self.callNoArg("finish");
+                try adapter.BaseCallNoArg(IFACE, self.allocator, self.obj, "finish");
             }
         };
     }
