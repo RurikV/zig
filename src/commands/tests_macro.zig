@@ -269,20 +269,26 @@ test "Macro: ChangeVelocity no-op for rotator without velocity" {
     try testing.expectApproxEqAbs(std.math.pi / 4.0, turret.angle, 1e-9);
 }
 
-
 // 7) Bridge + Repeater: continuous execution and cancellation via NoOp injection
 const CounterCtx = struct { n: *u32 };
 fn execCounter(ctx: *CounterCtx, _: *core.CommandQueue) !void {
     ctx.n.* += 1;
 }
 
-fn execBridge_T(ctx: *macro.BridgeCtx, q: *core.CommandQueue) anyerror!void { return macro.execBridge(ctx, q); }
-fn execNoOp_T(ctx: *macro.NoOpCtx, q: *core.CommandQueue) anyerror!void { return macro.execNoOp(ctx, q); }
-fn execRepeater_T(ctx: *macro.RepeaterCtx, q: *core.CommandQueue) anyerror!void { return macro.execRepeater(ctx, q); }
+fn execBridge_T(ctx: *macro.BridgeCtx, q: *core.CommandQueue) anyerror!void {
+    return macro.execBridge(ctx, q);
+}
+fn execNoOp_T(ctx: *macro.NoOpCtx, q: *core.CommandQueue) anyerror!void {
+    return macro.execNoOp(ctx, q);
+}
+fn execRepeater_T(ctx: *macro.RepeaterCtx, q: *core.CommandQueue) anyerror!void {
+    return macro.execRepeater(ctx, q);
+}
 
 test "Macro: Bridge+Repeater repeats then stops after NoOp inject" {
     t.tprint("Macro test: Bridge+Repeater repeats then stops after NoOp inject\n", .{});
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){}; defer _ = gpa.deinit();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
     const A = gpa.allocator();
 
     // Counter command
@@ -315,7 +321,8 @@ test "Macro: Bridge+Repeater repeats then stops after NoOp inject" {
     // Now set bridge to delegate to macro
     bridge_ctx.inner = mcmd;
 
-    var q = core.CommandQueue.init(A); defer q.deinit();
+    var q = core.CommandQueue.init(A);
+    defer q.deinit();
 
     // Seed the queue with the bridge
     try q.pushBack(bridge_cmd);

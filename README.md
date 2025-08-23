@@ -12,6 +12,7 @@ Both engines are decoupled from concrete game objects via duck-typed interfaces 
 - Library: `src/root.zig` implements engines and tests.
 - Executable: `src/main.zig` only prints a small info message; all logic is exercised by tests.
 - Build system: `build.zig` builds both a static library and an executable, and exposes `zig build test`.
+- IoC container: `src/commands/ioc.zig` provides a SOLID-friendly, extensible factory via a single Resolve API with per-thread scopes.
 
 ## Quick Start
 
@@ -279,3 +280,96 @@ Additional Modules
 
 - src/commands/macro.zig — Macro/utility commands (fuel, velocity change, bridge/repeater) and game-level error.
 - src/commands/tests_macro.zig — Macro and fuel/velocity tests with [TEST] logs.
+
+
+## IoC Container (Extensible Factory)
+
+A SOLID-friendly, extensible factory exposed via one API:
+- Resolve returns a Command you must execute; registration and admin operations are modeled as commands too.
+- Built-in admin ops: "IoC.Register", "Scopes.New", "Scopes.Current", and "IoC.Admin.Register" (to add custom admin ops at runtime).
+- Scopes: per-thread current scope so different threads (or games) can have independent strategies.
+
+Signatures:
+- Resolve: IoC.Resolve(alloc, key: []const u8, arg0: ?*anyopaque, arg1: ?*anyopaque) -> core.Command
+- FactoryFn: fn (allocator, args: [2]?*anyopaque) !core.Command
+- AdminFn (for custom admin ops): fn (allocator, args: [2]?*anyopaque) !core.Command
+
+Example 1: Register a move factory and use it (root scope)
+```zig
+const std = @import("std");
+const core = @import("commands/core.zig");
+const IoC = @import("commands/ioc.zig");
+
+const MoveCtx = struct { obj: *Ship }; // your object
+fn execMove(ctx: *MoveCtx, _: *core.CommandQueue) !void { try Movement.step(ctx.obj); }
+
+fn factory_make_move(allocator: std.mem.Allocator, args: [2]?*anyopaque) !core.Command {
+    const pobj: *Ship = @ptrCast(@alignCast(args[0] orelse return error.Invalid));
+    const mctx = try allocator.create(MoveCtx);
+    mctx.* = .{ .obj = pobj };
+    const Maker = core.CommandFactory(MoveCtx, execMove);
+    return Maker.makeOwned(mctx, .flaky, false, false);
+}
+
+pub fn demo(alloc: std.mem.Allocator, ship: *Ship) !void {
+    var q = core.CommandQueue.init(alloc);
+    defer q.deinit();
+
+    const key: []const u8 = "move";
+    const fptr: *const IoC.FactoryFn = &factory_make_move;
+    const reg = try IoC.Resolve(alloc, "IoC.Register", @ptrCast(@constCast(&key)), @ptrCast(@constCast(&fptr)));
+    defer if (reg.drop) |d| d(reg.ctx, alloc);
+    try reg.call(reg.ctx, &q);
+
+    const cmd = try IoC.Resolve(alloc, key, ship, null);
+    defer if (cmd.drop) |d| d(cmd.ctx, alloc);
+    try cmd.call(cmd.ctx, &q);
+}
+```
+
+Example 2: Per-scope strategies
+```zig
+const scopeA: []const u8 = "A";
+const scopeB: []const u8 = "B";
+
+// Create scopes
+try (try IoC.Resolve(A, "Scopes.New", @ptrCast(@constCast(&scopeA)), null)).call(cmd.ctx, &q);
+try (try IoC.Resolve(A, "Scopes.New", @ptrCast(@constCast(&scopeB)), null)).call(cmd.ctx, &q);
+
+// Set current to A and register move-once
+try (try IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&scopeA)), null)).call(cmd.ctx, &q);
+try (try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key)), @ptrCast(@constCast(&factory_make_move)))).call(cmd.ctx, &q);
+
+// Switch to B and register move-twice
+try (try IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&scopeB)), null)).call(cmd.ctx, &q);
+try (try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key)), @ptrCast(@constCast(&factory_make_move_twice)))).call(cmd.ctx, &q);
+```
+
+Example 3: Custom admin op (alias for Scopes.New)
+```zig
+const AdminAliasCtx = struct { name: []const u8 };
+fn execAdminAlias(ctx: *AdminAliasCtx, q: *core.CommandQueue) !void {
+    const inner = try IoC.Resolve(q.allocator, "Scopes.New", @ptrCast(@constCast(&ctx.name)), null);
+    defer if (inner.drop) |d| d(inner.ctx, q.allocator);
+    try inner.call(inner.ctx, q);
+}
+
+fn admin_new_scope_alias(allocator: std.mem.Allocator, args: [2]?*anyopaque) !core.Command {
+    const pname: *const []const u8 = @ptrCast(@alignCast(args[0] orelse return error.Invalid));
+    const Maker = core.CommandFactory(AdminAliasCtx, execAdminAlias);
+    const c = try allocator.create(AdminAliasCtx);
+    c.* = .{ .name = pname.* };
+    return Maker.makeOwned(c, .flaky, false, false);
+}
+
+// Register the new admin key and use it
+const alias: []const u8 = "Scopes.New2";
+const fnptr: *const IoC.AdminFn = &admin_new_scope_alias;
+try (try IoC.Resolve(A, "IoC.Admin.Register", @ptrCast(@constCast(&alias)), @ptrCast(@constCast(&fnptr)))).call(cmd.ctx, &q);
+try (try IoC.Resolve(A, "Scopes.New2", @ptrCast(@constCast(&scopeC)), null)).call(cmd.ctx, &q);
+```
+
+Notes
+- Multithreaded isolation: each thread has its own current scope; tests show two threads registering different strategies and acting independently.
+- Admin ops are dispatched via a registry (polymorphic, open for extension) so IoC.Resolve and initialization remain closed to modification.
+- See src/commands/tests_ioc.zig for end-to-end examples with [TEST] logs.
