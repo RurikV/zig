@@ -18,4 +18,5 @@ comptime {
     _ = @import("commands/tests_exceptions.zig");
     _ = @import("commands/tests_macro.zig");
     _ = @import("commands/tests_ioc.zig");
+    _ = @import("commands/tests_adapter.zig");
 }

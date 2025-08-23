@@ -54,6 +54,7 @@ const State = struct {
     scopes: std.StringHashMapUnmanaged(Scope) = .{},
     current_by_thread: std.AutoHashMapUnmanaged(ThreadId, []u8) = .{},
     admin_ops: std.StringHashMapUnmanaged(*const AdminFn) = .{},
+    adapter_ops: std.StringHashMapUnmanaged(*const AdminFn) = .{},
 
     fn init(a: Allocator) State {
         return .{ .allocator = a };
@@ -72,6 +73,9 @@ const State = struct {
         var it3 = self.admin_ops.iterator();
         while (it3.next()) |kv| self.allocator.free(kv.key_ptr.*);
         self.admin_ops.deinit(self.allocator);
+        var it4 = self.adapter_ops.iterator();
+        while (it4.next()) |kv| self.allocator.free(kv.key_ptr.*);
+        self.adapter_ops.deinit(self.allocator);
     }
 };
 
@@ -95,6 +99,9 @@ fn ensure() void {
     registerAdminBuiltin("Scopes.New", &opScopesNew);
     registerAdminBuiltin("Scopes.Current", &opScopesCurrent);
     registerAdminBuiltin("IoC.Admin.Register", &opAdminRegister);
+    // Adapter generator: no built-in adapters; only runtime-registered builders
+    // Allow registering new adapter builders at runtime
+    registerAdminBuiltin("Adapter.Register", &opAdapterRegister);
     initialized = true;
 }
 
@@ -105,6 +112,14 @@ fn dupKey(s: []const u8) ?[]u8 {
 fn registerAdminBuiltin(key: []const u8, fnptr: *const AdminFn) void {
     const dup = state.allocator.dupe(u8, key) catch return;
     _ = state.admin_ops.put(state.allocator, dup, fnptr) catch {
+        state.allocator.free(dup);
+        return;
+    };
+}
+
+fn registerAdapterBuiltin(iface: []const u8, fnptr: *const AdminFn) void {
+    const dup = state.allocator.dupe(u8, iface) catch return;
+    _ = state.adapter_ops.put(state.allocator, dup, fnptr) catch {
         state.allocator.free(dup);
         return;
     };
@@ -236,6 +251,27 @@ fn opAdminRegister(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Com
     return Maker.makeOwned(ctx, .flaky, false, false);
 }
 
+
+// Enable runtime registration of adapter builders
+const CmdAdapterRegisterCtx = struct { key: []const u8, func: *const AdminFn };
+fn execAdapterRegister(ctx: *CmdAdapterRegisterCtx, _: *core.CommandQueue) !void {
+    ensure();
+    state.mtx.lock();
+    defer state.mtx.unlock();
+    const dup = try state.allocator.dupe(u8, ctx.key);
+    errdefer state.allocator.free(dup);
+    try state.adapter_ops.put(state.allocator, dup, ctx.func);
+}
+
+fn opAdapterRegister(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Command {
+    const pkey: *const []const u8 = @ptrCast(@alignCast(args[0] orelse return error.Invalid));
+    const pfunc: *const *const AdminFn = @ptrCast(@alignCast(args[1] orelse return error.Invalid));
+    const ctx = try allocator.create(CmdAdapterRegisterCtx);
+    ctx.* = .{ .key = pkey.*, .func = pfunc.* };
+    const Maker = core.CommandFactory(CmdAdapterRegisterCtx, execAdapterRegister);
+    return Maker.makeOwned(ctx, .flaky, false, false);
+}
+
 // -------------- Resolve API --------------
 // args: a pair of optional pointers to arbitrary values, interpreted by factory/admin ops.
 // For IoC.Register: args[0] = pointer to []const u8 (key), args[1] = *const FactoryFn
@@ -244,14 +280,24 @@ fn opAdminRegister(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Com
 
 pub fn Resolve(allocator: Allocator, key: []const u8, arg0: ?*anyopaque, arg1: ?*anyopaque) anyerror!core.Command {
     ensure();
-    // 1) Try admin ops registry
+    // 1) Adapter dispatcher: keys that start with "Adapter." can be routed via adapter builders
+    if (key.len > 8 and std.mem.startsWith(u8, key, "Adapter.")) {
+        const iface = key[8..];
+        state.mtx.lock();
+        const ab = state.adapter_ops.get(iface);
+        state.mtx.unlock();
+        if (ab) |fnptr| {
+            return try fnptr(allocator, .{ arg0, arg1 });
+        }
+    }
+    // 2) Try admin ops registry
     state.mtx.lock();
     const admin_fn = state.admin_ops.get(key);
     state.mtx.unlock();
     if (admin_fn) |fnptr| {
         return try fnptr(allocator, .{ arg0, arg1 });
     }
-    // 2) Domain resolution in current scope
+    // 3) Domain resolution in current scope
     const scope = getCurrentScopePtr();
     const entry = scope.get(key) orelse return error.UnknownKey;
     return try entry.func(allocator, .{ arg0, arg1 });
