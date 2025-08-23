@@ -402,7 +402,7 @@ const key_pos_set: []const u8 = "Spaceship.Operations.IMovable:position.set";
 // factories must obey signatures described above (see src/commands/tests_adapter.zig)
 
 // 2) Create adapter via admin op and call methods
-// Define a MovableSpec with Methods(Self) as in tests, then:
+// Define a MovableSpec with Adapter(IFACE) returning a type that uses adapter.BaseInit/BaseCall* helpers (see tests), then:
 const Mov = adapter.InterfaceAdapter("Spaceship.Operations.IMovable", MovableSpec);
 var ad: *Mov = undefined;
 const make_ad = try IoC.Resolve(A, "Adapter.Spaceship.Operations.IMovable", @ptrCast(&ship), @ptrCast(&ad));
@@ -428,8 +428,8 @@ Notes
 
 Scaffold example: custom interface "Weapons.IFireable"
 
-1) Implement an adapter type generator that delegates to IoC (already provided):
-  - src/commands/example_fireable_adapter.zig defines FireableAdapterType(IFACE) that produces a type with methods:
+1) Implement a Spec that generates an adapter type and delegates to IoC (already provided):
+  - src/commands/example_fireable_adapter.zig defines FireableSpec with Adapter(IFACE) that returns a type with methods:
     - getAmmo() !u32  -> IoC key "<iface>:ammo.get"
     - fire() !void    -> IoC key "<iface>:fire"
     - reload(u32)     -> IoC key "<iface>:reload"
@@ -460,7 +460,7 @@ try (try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_reload)), @ptrC
 
 4) Create and use the adapter:
 ```zig
-const Fire = example.FireableAdapterType("Weapons.IFireable");
+const Fire = adapter.InterfaceAdapter("Weapons.IFireable", example.FireableSpec);
 var fireable: *Fire = undefined;
 try (try IoC.Resolve(A, "Adapter.Weapons.IFireable", obj_ptr, @ptrCast(&fireable))).call(cmd.ctx, &q);
 const ammo = try fireable.getAmmo();
@@ -470,13 +470,7 @@ A.destroy(fireable);
 ```
 
 
-### Note: FireableAdapterType with AdapterAdminBuilder
-- The generic AdapterAdminBuilder works with FireableAdapterType as well.
-- You can register builders for different interface names (e.g., Weapons.IFireable, Alt.IFireable) and the same adapter type will work against the keys derived from the chosen name.
-- See src/commands/tests_adapter.zig test "Adapter Generator: FireableAdapter for multiple interface names" for a complete example that demonstrates generalization and interface independence.
-
-
-### Note: Adapter generator with FireableAdapter
-- The generic AdapterAdminBuilder works with the example FireableAdapter.
-- You can register builders for different interface names (e.g., Weapons.IFireable, Alt.IFireable) and reuse the same adapter type.
+### Note: Using InterfaceAdapter with AdapterAdminBuilder (Fireable example)
+- The generic AdapterAdminBuilder works with adapter.InterfaceAdapter(IFACE, FireableSpec).
+- You can register builders for different interface names (e.g., Weapons.IFireable, Alt.IFireable) and reuse the same Spec; the generated type will call IoC using the chosen IFACE.
 - See src/commands/tests_adapter.zig test "Adapter Generator: FireableAdapter for multiple interface names" for a complete example demonstrating generalization and interface independence.
