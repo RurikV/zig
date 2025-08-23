@@ -251,7 +251,6 @@ fn opAdminRegister(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Com
     return Maker.makeOwned(ctx, .flaky, false, false);
 }
 
-
 // Enable runtime registration of adapter builders
 const CmdAdapterRegisterCtx = struct { key: []const u8, func: *const AdminFn };
 fn execAdapterRegister(ctx: *CmdAdapterRegisterCtx, _: *core.CommandQueue) !void {

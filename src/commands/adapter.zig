@@ -20,6 +20,7 @@ const Allocator = std.mem.Allocator;
 // The returned struct will include all methods declared by Spec.Methods(Self)
 // and provide IoC helper calls: callOut, callIn, callNoArg.
 pub fn InterfaceAdapter(comptime IFACE: []const u8, comptime Spec: type) type {
+    _ = Spec;
     return struct {
         allocator: Allocator,
         obj: *anyopaque,
@@ -65,7 +66,38 @@ pub fn InterfaceAdapter(comptime IFACE: []const u8, comptime Spec: type) type {
             try cmd.call(cmd.ctx, &q);
         }
 
-        pub usingnamespace Spec.Methods(Self);
+        // Default generic methods (exposed regardless of Spec) for common patterns
+        // Movable-like
+        pub fn getPosition(self: *Self) !vec.Vec2 {
+            var out_val: vec.Vec2 = .{ .x = 0, .y = 0 };
+            try self.callOut("position.get", &out_val);
+            return out_val;
+        }
+        pub fn getVelocity(self: *Self) !vec.Vec2 {
+            var out_val: vec.Vec2 = .{ .x = 0, .y = 0 };
+            try self.callOut("velocity.get", &out_val);
+            return out_val;
+        }
+        pub fn setPosition(self: *Self, new_pos: vec.Vec2) !void {
+            var tmp = new_pos;
+            try self.callIn("position.set", &tmp);
+        }
+        pub fn finish(self: *Self) !void {
+            try self.callNoArg("finish");
+        }
+        // Fireable-like
+        pub fn getAmmo(self: *Self) !u32 {
+            var out_val: u32 = 0;
+            try self.callOut("ammo.get", &out_val);
+            return out_val;
+        }
+        pub fn fire(self: *Self) !void {
+            try self.callNoArg("fire");
+        }
+        pub fn reload(self: *Self, amount: u32) !void {
+            var tmp = amount;
+            try self.callIn("reload", &tmp);
+        }
     };
 }
 
@@ -79,7 +111,9 @@ pub fn InterfaceAdapter(comptime IFACE: []const u8, comptime Spec: type) type {
 pub fn AdapterAdminBuilder(comptime T: type, comptime IFACE: []const u8) type {
     return struct {
         const Ctx = struct { obj: *anyopaque, out: **T };
-        fn execNoop(_: *Ctx, _: *core.CommandQueue) !void { return; }
+        fn execNoop(_: *Ctx, _: *core.CommandQueue) !void {
+            return;
+        }
         pub fn make(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Command {
             const pobj: *anyopaque = args[0] orelse return error.Invalid;
             const pout: **T = @ptrCast(@alignCast(args[1] orelse return error.Invalid));

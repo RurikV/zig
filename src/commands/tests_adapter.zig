@@ -422,7 +422,6 @@ test "Adapter: optional finish() method delegates to IoC" {
     A.destroy(padapter);
 }
 
-
 // Generator test: use generic AdapterAdminBuilder to register and use a builder for a custom iface
 test "Adapter Generator: register and use generated builder" {
     t.tprint("Adapter generator test: register builder for Gen.Interface and delegate\n", .{});
@@ -473,12 +472,13 @@ test "Adapter Generator: register and use generated builder" {
     A.destroy(pad);
 }
 
-
 // ---- FireableAdapter helpers for tests ----
 const Weapon = struct { ammo: u32 };
 
 const AmmoGetCtx = struct { w: *Weapon, out: *u32 };
-fn exec_ammo_get(ctx: *AmmoGetCtx, _: *core.CommandQueue) !void { ctx.out.* = ctx.w.ammo; }
+fn exec_ammo_get(ctx: *AmmoGetCtx, _: *core.CommandQueue) !void {
+    ctx.out.* = ctx.w.ammo;
+}
 
 const FireCtx = struct { w: *Weapon };
 fn exec_fire(ctx: *FireCtx, _: *core.CommandQueue) !void {
@@ -486,7 +486,9 @@ fn exec_fire(ctx: *FireCtx, _: *core.CommandQueue) !void {
 }
 
 const ReloadCtx = struct { w: *Weapon, amount: u32 };
-fn exec_reload(ctx: *ReloadCtx, _: *core.CommandQueue) !void { ctx.w.ammo += ctx.amount; }
+fn exec_reload(ctx: *ReloadCtx, _: *core.CommandQueue) !void {
+    ctx.w.ammo += ctx.amount;
+}
 
 fn f_ammo_get_fireable(allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command {
     const w: *Weapon = @ptrCast(@alignCast(args[0] orelse return error.Invalid));
