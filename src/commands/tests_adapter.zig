@@ -6,8 +6,52 @@ const fixtures = @import("../space/fixtures.zig");
 const core = @import("core.zig");
 const IoC = @import("ioc.zig");
 const adapter = @import("adapter.zig");
+const fireable = @import("example_fireable_adapter.zig");
 
 const Vec2 = vec.Vec2;
+
+// Define Movable interface Spec and generate adapter types via InterfaceAdapter
+const MovableSpec = struct {
+    pub fn Methods(comptime Self: type) type {
+        return struct {
+            pub fn getPosition(self: *Self) !Vec2 {
+                var out_val: Vec2 = .{ .x = 0, .y = 0 };
+                try self.callOut("position.get", &out_val);
+                return out_val;
+            }
+            pub fn getVelocity(self: *Self) !Vec2 {
+                var out_val: Vec2 = .{ .x = 0, .y = 0 };
+                try self.callOut("velocity.get", &out_val);
+                return out_val;
+            }
+            pub fn setPosition(self: *Self, new_pos: Vec2) !void {
+                var tmp = new_pos;
+                try self.callIn("position.set", &tmp);
+            }
+            pub fn finish(self: *Self) !void {
+                try self.callNoArg("finish");
+            }
+        };
+    }
+};
+
+// Use generated movable adapter type for standard interface
+const IF_MOV: []const u8 = "Spaceship.Operations.IMovable";
+const Mov = adapter.InterfaceAdapter(IF_MOV, MovableSpec);
+const MovMy = adapter.InterfaceAdapter("My.Interface", MovableSpec);
+const MovGen = adapter.InterfaceAdapter("Gen.Interface", MovableSpec);
+
+// Helper: register Movable adapter builder once per process using AdapterAdminBuilder
+var g_movable_builder_registered: bool = false;
+fn register_movable_builder_once(A: std.mem.Allocator, q: *core.CommandQueue) !void {
+    if (g_movable_builder_registered) return;
+    const Gen = adapter.AdapterAdminBuilder(Mov, IF_MOV);
+    const builder: *const IoC.AdminFn = &Gen.make;
+    const reg = try IoC.Resolve(A, "Adapter.Register", @ptrCast(@constCast(&IF_MOV)), @ptrCast(@constCast(&builder)));
+    defer if (reg.drop) |d| d(reg.ctx, A);
+    try reg.call(reg.ctx, q);
+    g_movable_builder_registered = true;
+}
 
 // ---- Top-level contexts and execs for factories ----
 const PosGetCtx = struct { s: *fixtures.GoodShip, out: *Vec2 };
@@ -84,7 +128,8 @@ test "Adapter: getPosition fails with UnknownKey when not registered" {
 
     var ship = fixtures.GoodShip{ .pos = .{ .x = 0, .y = 0 }, .vel = .{ .x = 0, .y = 0 }, .angle = 0, .ang_vel = 0 };
 
-    var padapter: *adapter.MovableAdapter = undefined;
+    try register_movable_builder_once(A, &q);
+    var padapter: *Mov = undefined;
     const make_ad = try IoC.Resolve(A, "Adapter.Spaceship.Operations.IMovable", @ptrCast(@constCast(&ship)), @ptrCast(&padapter));
     defer if (make_ad.drop) |d| d(make_ad.ctx, A);
     try make_ad.call(make_ad.ctx, &q);
@@ -152,7 +197,8 @@ test "Adapter: delegation uses current IoC scope" {
 
     // Build adapter (adapter construction doesn't depend on scope)
     var ship = fixtures.GoodShip{ .pos = .{ .x = 3, .y = 4 }, .vel = .{ .x = 0, .y = 0 }, .angle = 0, .ang_vel = 0 };
-    var padapter: *adapter.MovableAdapter = undefined;
+    try register_movable_builder_once(A, &q);
+    var padapter: *Mov = undefined;
     const make_ad = try IoC.Resolve(A, "Adapter.Spaceship.Operations.IMovable", @ptrCast(@constCast(&ship)), @ptrCast(&padapter));
     defer if (make_ad.drop) |d| d(make_ad.ctx, A);
     try make_ad.call(make_ad.ctx, &q);
@@ -177,7 +223,7 @@ test "Adapter: delegation uses current IoC scope" {
 }
 
 // Adapter.Register: register a custom adapter builder for custom interface name
-const MyAdapterBuilderCtx = struct { obj: *anyopaque, out: **adapter.MovableAdapter };
+const MyAdapterBuilderCtx = struct { obj: *anyopaque, out: **MovMy };
 fn exec_make_my_adapter(ctx: *MyAdapterBuilderCtx, _: *core.CommandQueue) !void {
     // Build MovableAdapter but with iface "My.Interface"
     const alloc = std.heap.page_allocator; // not used for actual alloc; out already points outside
@@ -189,9 +235,9 @@ fn exec_make_my_adapter(ctx: *MyAdapterBuilderCtx, _: *core.CommandQueue) !void 
 
 fn admin_make_my_interface_adapter(allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command {
     const pobj: *anyopaque = args[0] orelse return error.Invalid;
-    const pout: **adapter.MovableAdapter = @ptrCast(@alignCast(args[1] orelse return error.Invalid));
-    const a = try allocator.create(adapter.MovableAdapter);
-    a.* = adapter.MovableAdapter.init(allocator, "My.Interface", pobj);
+    const pout: **MovMy = @ptrCast(@alignCast(args[1] orelse return error.Invalid));
+    const a = try allocator.create(MovMy);
+    a.* = MovMy.init(allocator, "My.Interface", pobj);
     pout.* = a;
     const Maker = core.CommandFactory(MyAdapterBuilderCtx, exec_make_my_adapter);
     const c = try allocator.create(MyAdapterBuilderCtx);
@@ -230,7 +276,7 @@ test "Adapter: runtime Adapter.Register for custom interface name" {
 
     // Create adapter via "Adapter.My.Interface"
     var ship = fixtures.GoodShip{ .pos = .{ .x = 2, .y = 2 }, .vel = .{ .x = 0, .y = 0 }, .angle = 0, .ang_vel = 0 };
-    var pad: *adapter.MovableAdapter = undefined;
+    var pad: *MovMy = undefined;
     const make_ad = try IoC.Resolve(A, "Adapter.My.Interface", @ptrCast(@constCast(&ship)), @ptrCast(&pad));
     defer if (make_ad.drop) |d| d(make_ad.ctx, A);
     try make_ad.call(make_ad.ctx, &q);
@@ -275,7 +321,8 @@ test "Adapter: method error propagates from failing factory exec" {
     try reg_fail.call(reg_fail.ctx, &q);
 
     var ship = fixtures.GoodShip{ .pos = .{ .x = 0, .y = 0 }, .vel = .{ .x = 0, .y = 0 }, .angle = 0, .ang_vel = 0 };
-    var pad: *adapter.MovableAdapter = undefined;
+    try register_movable_builder_once(A, &q);
+    var pad: *Mov = undefined;
     const make_ad = try IoC.Resolve(A, "Adapter.Spaceship.Operations.IMovable", @ptrCast(@constCast(&ship)), @ptrCast(&pad));
     defer if (make_ad.drop) |d| d(make_ad.ctx, A);
     try make_ad.call(make_ad.ctx, &q);
@@ -320,7 +367,8 @@ test "Adapter: MovableAdapter via IoC admin op and method delegation" {
     var ship = fixtures.GoodShip{ .pos = .{ .x = 1, .y = 2 }, .vel = .{ .x = 3, .y = 4 }, .angle = 0, .ang_vel = 0 };
 
     // Use IoC admin op to allocate adapter and receive it via out pointer
-    var padapter: *adapter.MovableAdapter = undefined;
+    try register_movable_builder_once(A, &q);
+    var padapter: *Mov = undefined;
     const make_ad = try IoC.Resolve(A, "Adapter.Spaceship.Operations.IMovable", @ptrCast(@constCast(&ship)), @ptrCast(&padapter));
     defer if (make_ad.drop) |d| d(make_ad.ctx, A);
     try make_ad.call(make_ad.ctx, &q);
@@ -360,7 +408,8 @@ test "Adapter: optional finish() method delegates to IoC" {
     try regf.call(regf.ctx, &q);
 
     var ship = fixtures.GoodShip{ .pos = .{ .x = 7, .y = 8 }, .vel = .{ .x = 0, .y = 0 }, .angle = 0, .ang_vel = 0 };
-    var padapter: *adapter.MovableAdapter = undefined;
+    try register_movable_builder_once(A, &q);
+    var padapter: *Mov = undefined;
     const make_ad = try IoC.Resolve(A, "Adapter.Spaceship.Operations.IMovable", @ptrCast(@constCast(&ship)), @ptrCast(&padapter));
     defer if (make_ad.drop) |d| d(make_ad.ctx, A);
     try make_ad.call(make_ad.ctx, &q);
@@ -371,4 +420,190 @@ test "Adapter: optional finish() method delegates to IoC" {
     try testing.expectEqual(@as(f64, -999), p.y);
 
     A.destroy(padapter);
+}
+
+
+// Generator test: use generic AdapterAdminBuilder to register and use a builder for a custom iface
+test "Adapter Generator: register and use generated builder" {
+    t.tprint("Adapter generator test: register builder for Gen.Interface and delegate\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const A = gpa.allocator();
+    var q = core.CommandQueue.init(A);
+    defer q.deinit();
+
+    // Register factories for Gen.Interface
+    const k_get_pos = "Gen.Interface:position.get";
+    const k_set_pos = "Gen.Interface:position.set";
+    const FGetPos: *const IoC.FactoryFn = &f_pos_get;
+    const FSetPos: *const IoC.FactoryFn = &f_pos_set;
+    var key1: []const u8 = k_get_pos;
+    var key2: []const u8 = k_set_pos;
+    const reg1 = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key1)), @ptrCast(@constCast(&FGetPos)));
+    defer if (reg1.drop) |d| d(reg1.ctx, A);
+    try reg1.call(reg1.ctx, &q);
+    const reg2 = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key2)), @ptrCast(@constCast(&FSetPos)));
+    defer if (reg2.drop) |d| d(reg2.ctx, A);
+    try reg2.call(reg2.ctx, &q);
+
+    // Generate builder for Movable adapter bound to Gen.Interface and register it
+    const Gen = adapter.AdapterAdminBuilder(MovGen, "Gen.Interface");
+    const builder: *const IoC.AdminFn = &Gen.make;
+    const IFACE: []const u8 = "Gen.Interface";
+    const reg_ad = try IoC.Resolve(A, "Adapter.Register", @ptrCast(@constCast(&IFACE)), @ptrCast(@constCast(&builder)));
+    defer if (reg_ad.drop) |d| d(reg_ad.ctx, A);
+    try reg_ad.call(reg_ad.ctx, &q);
+
+    // Create adapter and verify delegation
+    var ship = fixtures.GoodShip{ .pos = .{ .x = 5, .y = 6 }, .vel = .{ .x = 0, .y = 0 }, .angle = 0, .ang_vel = 0 };
+    var pad: *MovGen = undefined;
+    const make_ad = try IoC.Resolve(A, "Adapter.Gen.Interface", @ptrCast(@constCast(&ship)), @ptrCast(&pad));
+    defer if (make_ad.drop) |d| d(make_ad.ctx, A);
+    try make_ad.call(make_ad.ctx, &q);
+
+    const p = try pad.getPosition();
+    try testing.expectEqual(@as(f64, 5), p.x);
+    try testing.expectEqual(@as(f64, 6), p.y);
+
+    try pad.setPosition(.{ .x = 11, .y = 12 });
+    const p2 = try pad.getPosition();
+    try testing.expectEqual(@as(f64, 11), p2.x);
+    try testing.expectEqual(@as(f64, 12), p2.y);
+
+    A.destroy(pad);
+}
+
+
+// ---- FireableAdapter helpers for tests ----
+const Weapon = struct { ammo: u32 };
+
+const AmmoGetCtx = struct { w: *Weapon, out: *u32 };
+fn exec_ammo_get(ctx: *AmmoGetCtx, _: *core.CommandQueue) !void { ctx.out.* = ctx.w.ammo; }
+
+const FireCtx = struct { w: *Weapon };
+fn exec_fire(ctx: *FireCtx, _: *core.CommandQueue) !void {
+    if (ctx.w.ammo > 0) ctx.w.ammo -= 1;
+}
+
+const ReloadCtx = struct { w: *Weapon, amount: u32 };
+fn exec_reload(ctx: *ReloadCtx, _: *core.CommandQueue) !void { ctx.w.ammo += ctx.amount; }
+
+fn f_ammo_get_fireable(allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command {
+    const w: *Weapon = @ptrCast(@alignCast(args[0] orelse return error.Invalid));
+    const pout: *u32 = @ptrCast(@alignCast(args[1] orelse return error.Invalid));
+    const Maker = core.CommandFactory(AmmoGetCtx, exec_ammo_get);
+    const c = try allocator.create(AmmoGetCtx);
+    c.* = .{ .w = w, .out = pout };
+    return Maker.makeOwned(c, .flaky, false, false);
+}
+
+fn f_fire_fireable(allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command {
+    const w: *Weapon = @ptrCast(@alignCast(args[0] orelse return error.Invalid));
+    const Maker = core.CommandFactory(FireCtx, exec_fire);
+    const c = try allocator.create(FireCtx);
+    c.* = .{ .w = w };
+    return Maker.makeOwned(c, .flaky, false, false);
+}
+
+fn f_reload_fireable(allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command {
+    const w: *Weapon = @ptrCast(@alignCast(args[0] orelse return error.Invalid));
+    const pin: *const u32 = @ptrCast(@alignCast(args[1] orelse return error.Invalid));
+    const Maker = core.CommandFactory(ReloadCtx, exec_reload);
+    const c = try allocator.create(ReloadCtx);
+    c.* = .{ .w = w, .amount = pin.* };
+    return Maker.makeOwned(c, .flaky, false, false);
+}
+
+test "Adapter Generator: FireableAdapter for multiple interface names" {
+    t.tprint("Adapter generator test: FireableAdapter works for multiple IFACEs\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const A = gpa.allocator();
+    var q = core.CommandQueue.init(A);
+    defer q.deinit();
+
+    // Two different interface names using the same adapter type
+    const IFACE1: []const u8 = "Weapons.IFireable";
+    const IFACE2: []const u8 = "Alt.IFireable";
+
+    // Register factories for both IFACEs
+    const FAmmoGet: *const IoC.FactoryFn = &f_ammo_get_fireable;
+    const FFire: *const IoC.FactoryFn = &f_fire_fireable;
+    const FReload: *const IoC.FactoryFn = &f_reload_fireable;
+
+    var key_ammo1: []const u8 = "Weapons.IFireable:ammo.get";
+    var key_fire1: []const u8 = "Weapons.IFireable:fire";
+    var key_reload1: []const u8 = "Weapons.IFireable:reload";
+
+    var key_ammo2: []const u8 = "Alt.IFireable:ammo.get";
+    var key_fire2: []const u8 = "Alt.IFireable:fire";
+    var key_reload2: []const u8 = "Alt.IFireable:reload";
+
+    const r1 = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_ammo1)), @ptrCast(@constCast(&FAmmoGet)));
+    defer if (r1.drop) |d| d(r1.ctx, A);
+    try r1.call(r1.ctx, &q);
+    const r2 = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_fire1)), @ptrCast(@constCast(&FFire)));
+    defer if (r2.drop) |d| d(r2.ctx, A);
+    try r2.call(r2.ctx, &q);
+    const r3 = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_reload1)), @ptrCast(@constCast(&FReload)));
+    defer if (r3.drop) |d| d(r3.ctx, A);
+    try r3.call(r3.ctx, &q);
+
+    const r4 = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_ammo2)), @ptrCast(@constCast(&FAmmoGet)));
+    defer if (r4.drop) |d| d(r4.ctx, A);
+    try r4.call(r4.ctx, &q);
+    const r5 = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_fire2)), @ptrCast(@constCast(&FFire)));
+    defer if (r5.drop) |d| d(r5.ctx, A);
+    try r5.call(r5.ctx, &q);
+    const r6 = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&key_reload2)), @ptrCast(@constCast(&FReload)));
+    defer if (r6.drop) |d| d(r6.ctx, A);
+    try r6.call(r6.ctx, &q);
+
+    // Register adapter builders for both IFACEs using the generic generator
+    const Gen1 = adapter.AdapterAdminBuilder(adapter.InterfaceAdapter(IFACE1, fireable.FireableSpec), IFACE1);
+    const Gen2 = adapter.AdapterAdminBuilder(adapter.InterfaceAdapter(IFACE2, fireable.FireableSpec), IFACE2);
+    const B1: *const IoC.AdminFn = &Gen1.make;
+    const B2: *const IoC.AdminFn = &Gen2.make;
+
+    const reg_ad1 = try IoC.Resolve(A, "Adapter.Register", @ptrCast(@constCast(&IFACE1)), @ptrCast(@constCast(&B1)));
+    defer if (reg_ad1.drop) |d| d(reg_ad1.ctx, A);
+    try reg_ad1.call(reg_ad1.ctx, &q);
+
+    const reg_ad2 = try IoC.Resolve(A, "Adapter.Register", @ptrCast(@constCast(&IFACE2)), @ptrCast(@constCast(&B2)));
+    defer if (reg_ad2.drop) |d| d(reg_ad2.ctx, A);
+    try reg_ad2.call(reg_ad2.ctx, &q);
+
+    // Create the object and both adapters
+    const Fire1 = adapter.InterfaceAdapter(IFACE1, fireable.FireableSpec);
+    const Fire2 = adapter.InterfaceAdapter(IFACE2, fireable.FireableSpec);
+    var w = Weapon{ .ammo = 5 };
+    var ad1: *Fire1 = undefined;
+    var ad2: *Fire2 = undefined;
+
+    const mk1 = try IoC.Resolve(A, "Adapter.Weapons.IFireable", @ptrCast(@constCast(&w)), @ptrCast(&ad1));
+    defer if (mk1.drop) |d| d(mk1.ctx, A);
+    try mk1.call(mk1.ctx, &q);
+
+    const mk2 = try IoC.Resolve(A, "Adapter.Alt.IFireable", @ptrCast(@constCast(&w)), @ptrCast(&ad2));
+    defer if (mk2.drop) |d| d(mk2.ctx, A);
+    try mk2.call(mk2.ctx, &q);
+
+    // Validate behavior through both adapters referencing the same object
+    const a0 = try ad1.getAmmo();
+    try testing.expectEqual(@as(u32, 5), a0);
+
+    try ad1.fire(); // ammo: 4
+    const a1 = try ad1.getAmmo();
+    try testing.expectEqual(@as(u32, 4), a1);
+
+    try ad2.reload(3); // ammo: 7
+    const a2 = try ad2.getAmmo();
+    try testing.expectEqual(@as(u32, 7), a2);
+
+    try ad2.fire(); // ammo: 6
+    const a3 = try ad1.getAmmo();
+    try testing.expectEqual(@as(u32, 6), a3);
+
+    A.destroy(ad1);
+    A.destroy(ad2);
 }

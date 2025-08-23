@@ -99,9 +99,7 @@ fn ensure() void {
     registerAdminBuiltin("Scopes.New", &opScopesNew);
     registerAdminBuiltin("Scopes.Current", &opScopesCurrent);
     registerAdminBuiltin("IoC.Admin.Register", &opAdminRegister);
-    // Adapter generator: register builder in adapter registry and keep exact admin key for backward compatibility
-    registerAdapterBuiltin("Spaceship.Operations.IMovable", &opAdapterMovable);
-    registerAdminBuiltin("Adapter.Spaceship.Operations.IMovable", &opAdapterMovable);
+    // Adapter generator: no built-in adapters; only runtime-registered builders
     // Allow registering new adapter builders at runtime
     registerAdminBuiltin("Adapter.Register", &opAdapterRegister);
     initialized = true;
@@ -253,25 +251,6 @@ fn opAdminRegister(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Com
     return Maker.makeOwned(ctx, .flaky, false, false);
 }
 
-// ---- Adapter admin operations ----
-const Adapter = @import("adapter.zig");
-const NoopCtx = struct {};
-fn execNoop(_: *NoopCtx, _: *core.CommandQueue) !void {
-    return;
-}
-
-// Builder for IMovable adapters (compatible with AdminFn signature)
-fn opAdapterMovable(allocator: Allocator, args: [2]?*anyopaque) anyerror!core.Command {
-    const pobj: *anyopaque = args[0] orelse return error.Invalid;
-    const pout: **Adapter.MovableAdapter = @ptrCast(@alignCast(args[1] orelse return error.Invalid));
-    const adapter = try allocator.create(Adapter.MovableAdapter);
-    adapter.* = Adapter.MovableAdapter.init(allocator, "Spaceship.Operations.IMovable", pobj);
-    pout.* = adapter;
-    const Maker = core.CommandFactory(NoopCtx, execNoop);
-    const c = try allocator.create(NoopCtx);
-    c.* = .{};
-    return Maker.makeOwned(c, .flaky, false, false);
-}
 
 // Enable runtime registration of adapter builders
 const CmdAdapterRegisterCtx = struct { key: []const u8, func: *const AdminFn };
