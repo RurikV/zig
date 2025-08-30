@@ -474,3 +474,55 @@ A.destroy(fireable);
 - The generic AdapterAdminBuilder works with adapter.InterfaceAdapter(IFACE, FireableSpec).
 - You can register builders for different interface names (e.g., Weapons.IFireable, Alt.IFireable) and reuse the same Spec; the generated type will call IoC using the chosen IFACE.
 - See src/commands/tests_adapter.zig test "Adapter Generator: FireableAdapter for multiple interface names" for a complete example demonstrating generalization and interface independence.
+
+
+## Threaded Command Worker
+
+A minimal multithreaded command execution subsystem that runs commands from a per-worker queue in a background thread.
+
+Key points:
+- Each Worker owns a thread-safe queue (protected by mutex + condition variable).
+- Start/Stop are exposed as commands, so they compose with the existing command/handler ecosystem.
+- Hard stop: terminates the loop immediately (remaining queued commands are not guaranteed to run).
+- Soft stop: stops once the queue becomes empty (waits for all queued work to finish).
+- Command execution exceptions are caught and do not terminate the worker thread.
+
+Files:
+- src/commands/threading.zig — Worker implementation and Start/HardStop/SoftStop commands.
+- src/commands/tests_threading.zig — tests for start and both stop modes.
+
+Quick usage:
+```zig
+const std = @import("std");
+const core = @import("commands/core.zig");
+const threading = @import("commands/threading.zig");
+
+pub fn demo(alloc: std.mem.Allocator) !void {
+    var w = threading.Worker.init(alloc);
+    defer w.deinit();
+
+    // Start the worker via command
+    var q = core.CommandQueue.init(alloc);
+    defer q.deinit();
+    var sctx = threading.StartCtx{ .worker = &w };
+    try q.pushBack(threading.ThreadingFactory.StartCommand(&sctx));
+    // Process start command in the current thread
+    while (q.popFront()) |cmd| { cmd.call(cmd.ctx, &q) catch {}; if (cmd.drop) |d| d(cmd.ctx, alloc); }
+
+    // Optionally wait until the background thread reported it started
+    w.waitStarted();
+
+    // Enqueue some work items to be executed by the worker thread
+    const NoopCtx = struct {};
+    fn execNoop(_: *NoopCtx, _: *core.CommandQueue) !void {}
+    const Maker = core.CommandFactory(NoopCtx, execNoop);
+    var c = NoopCtx{};
+    w.enqueue(Maker.make(&c, .flaky));
+
+    // Graceful shutdown: wait until the queue drains
+    var ss = threading.SoftStopCtx{ .worker = &w };
+    try q.pushBack(threading.ThreadingFactory.SoftStopCommand(&ss));
+    while (q.popFront()) |cmd| { cmd.call(cmd.ctx, &q) catch {}; if (cmd.drop) |d| d(cmd.ctx, alloc); }
+}
+```
+

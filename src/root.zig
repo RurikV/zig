@@ -10,6 +10,7 @@ pub const Rotation = @import("space/rotation.zig").Rotation;
 pub const commands = struct {
     pub const core = @import("commands/core.zig");
     pub const handlers = @import("commands/handlers.zig");
+    pub const threading = @import("commands/threading.zig");
 };
 
 // Ensure tests from split files are compiled
@@ -19,4 +20,5 @@ comptime {
     _ = @import("commands/tests_macro.zig");
     _ = @import("commands/tests_ioc.zig");
     _ = @import("commands/tests_adapter.zig");
+    _ = @import("commands/tests_threading.zig");
 }
