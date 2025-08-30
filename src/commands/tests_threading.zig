@@ -17,7 +17,9 @@ fn execSleepInc(ctx: *SleepIncCtx, _: *CommandQueue) !void {
 
 // A no-op command for use in tests
 const NoopCtx = struct {};
-fn execNoop(_: *NoopCtx, _: *CommandQueue) !void { return; }
+fn execNoop(_: *NoopCtx, _: *CommandQueue) !void {
+    return;
+}
 
 // Helper to drain a simple queue of commands by executing them directly (single-threaded)
 fn runQueue(q: *CommandQueue) void {
