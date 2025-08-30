@@ -8,10 +8,9 @@ const threading = @import("threading.zig");
 const CommandQueue = core.CommandQueue;
 const CommandFactory = core.CommandFactory;
 
-// Simple command that sleeps for a short time and increments a shared counter
-const SleepIncCtx = struct { counter: *usize, ns: u64 };
-fn execSleepInc(ctx: *SleepIncCtx, _: *CommandQueue) !void {
-    std.time.sleep(ctx.ns);
+// Simple command that increments a shared counter (no sleeping)
+const IncCtx = struct { counter: *usize };
+fn execInc(ctx: *IncCtx, _: *CommandQueue) !void {
     ctx.counter.* += 1;
 }
 
@@ -74,14 +73,13 @@ test "Threading: hard stop stops without draining remaining tasks" {
 
     // Enqueue several tasks
     var counter: usize = 0;
-    const Maker = CommandFactory(SleepIncCtx, execSleepInc);
-    const per_ns: u64 = 2_000_000; // 2 ms
-    const total: usize = 10;
+    const Maker = CommandFactory(IncCtx, execInc);
+    const total: usize = 100_000; // large to ensure some remain after hard stop
     var i: usize = 0;
     while (i < total) : (i += 1) {
-        const ctx = SleepIncCtx{ .counter = &counter, .ns = per_ns };
+        const ctx = IncCtx{ .counter = &counter };
         // allocate owned context to avoid stack pointer lifetime issues
-        const heap_ctx = try alloc.create(SleepIncCtx);
+        const heap_ctx = try alloc.create(IncCtx);
         heap_ctx.* = ctx;
         const cmd = Maker.makeOwned(heap_ctx, .flaky, false, false);
         w.enqueue(cmd);
@@ -116,13 +114,12 @@ test "Threading: soft stop waits for all queued tasks to finish" {
 
     // Enqueue several tasks
     var counter: usize = 0;
-    const Maker = CommandFactory(SleepIncCtx, execSleepInc);
-    const per_ns: u64 = 1_000_000; // 1 ms
-    const total: usize = 8;
+    const Maker = CommandFactory(IncCtx, execInc);
+    const total: usize = 20;
     var i: usize = 0;
     while (i < total) : (i += 1) {
-        const heap_ctx = try alloc.create(SleepIncCtx);
-        heap_ctx.* = .{ .counter = &counter, .ns = per_ns };
+        const heap_ctx = try alloc.create(IncCtx);
+        heap_ctx.* = .{ .counter = &counter };
         const cmd = Maker.makeOwned(heap_ctx, .flaky, false, false);
         w.enqueue(cmd);
     }
