@@ -475,6 +475,87 @@ A.destroy(fireable);
 - You can register builders for different interface names (e.g., Weapons.IFireable, Alt.IFireable) and reuse the same Spec; the generated type will call IoC using the chosen IFACE.
 - See src/commands/tests_adapter.zig test "Adapter Generator: FireableAdapter for multiple interface names" for a complete example demonstrating generalization and interface independence.
 
+## Inbound Messaging Endpoint (HTTP)
+
+Goal
+- Provide an endpoint for Agents to send messages to the Game Server.
+- The server routes each message to the correct game by game_id, builds an InterpretCommand (IoC-based), and enqueues it into that game’s command queue.
+
+Universal message format (JSON)
+- game_id: string — identifies the battle/game instance and routes to a per-game queue.
+- object_id: string — identifies the in-game object the operation targets.
+- operation_id: string — an abstract operation name, mapped on the server side to an IoC key. This indirection prevents command injection.
+- args: object — arbitrary operation parameters; the endpoint treats it as opaque.
+
+Example
+```json
+{
+  "game_id": "g1",
+  "object_id": "548",
+  "operation_id": "move",
+  "args": { "speed": 2 }
+}
+```
+
+Files
+- src/server.zig — endpoint/server, message parsing, game registry, InterpretCommand.
+- src/commands/tests_endpoint.zig — tests for parsing and routing.
+
+How InterpretCommand works
+- Input: InboundMessage (game_id, object_id, operation_id, args_json).
+- OpRouter maps external operation_id -> internal IoC key (prevents injection).
+- Calls IoC.Resolve(alloc, ioc_key, &object_id, &args_json) to build a domain command.
+- Enqueues the domain command to the GameRuntime worker for the addressed game.
+
+Security and SOLID
+- operation_id is NOT used directly to resolve IoC entries; only allowed operations from OpRouter are resolved.
+- args are passed as an opaque JSON string; concrete domain commands decide how to parse them. This keeps the endpoint closed for modification when new rules appear.
+
+HTTP endpoint
+- Method/Path: POST /message
+- Body: JSON in the universal format.
+- Responses: 200 OK on success; 400 Bad Request on invalid format or unmapped operation.
+
+Minimal usage example
+```zig
+const std = @import("std");
+const server = @import("src/server.zig");
+const IoC = @import("src/commands/ioc.zig");
+const core = @import("src/commands/core.zig");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const A = gpa.allocator();
+
+    var reg = server.GameRegistry.init(A);
+    defer reg.deinit();
+    var router = server.OpRouter.init();
+    defer router.deinit(A);
+
+    // Map public operation_id to internal IoC key
+    try router.put(A, "move", "domain.move");
+
+    // Register IoC factory for domain.move in current scope
+    const scope: []const u8 = "prod";
+    var q = core.CommandQueue.init(A);
+    try (try IoC.Resolve(A, "Scopes.New", @ptrCast(@constCast(&scope)), null)).call(@ptrCast(0), &q);
+    try (try IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&scope)), null)).call(@ptrCast(0), &q);
+    // TODO: register your factory under key "domain.move" here
+
+    // Run HTTP server on 0.0.0.0:8080
+    try server.run_server(A, &reg, &router, "0.0.0.0");
+}
+```
+
+Test coverage
+- Parses message format.
+- InterpretCommand enqueues a domain command into the correct per-game queue.
+
+Implementation highlights
+- GameRegistry: per-game Worker based on src/commands/threading.zig; efficient synchronized queue, minimal locking.
+- OpRouter: internal hashmap mapping external operation_id to IoC keys (open for extension, closed for modification at the endpoint).
+- parse_inbound_json: uses std.json and keeps args as raw JSON to remain generic.
 
 ## Threaded Command Worker
 
