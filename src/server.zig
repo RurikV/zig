@@ -206,14 +206,28 @@ pub fn parse_inbound_json(a: Allocator, src: []const u8) !InboundMessage {
     const args_text = blk: {
         // Use comptime to completely avoid compiling incompatible branches
         if (comptime @hasDecl(std.json, "stringifyAlloc")) {
-            // Zig master API
-            break :blk try std.json.stringifyAlloc(a, args_v.*, .{});
+            // Zig master API - with runtime fallback
+            break :blk std.json.stringifyAlloc(a, args_v.*, .{}) catch blk_fallback: {
+                // If stringifyAlloc fails, try the manual approach
+                if (comptime @hasDecl(std.json, "stringify")) {
+                    var out: std.ArrayListUnmanaged(u8) = .{};
+                    defer out.deinit(a);
+                    std.json.stringify(args_v.*, .{}, out.writer(a)) catch {
+                        break :blk_fallback try a.dupe(u8, "{}");
+                    };
+                    break :blk_fallback out.toOwnedSlice(a) catch try a.dupe(u8, "{}");
+                } else {
+                    break :blk_fallback try a.dupe(u8, "{}");
+                }
+            };
         } else if (comptime @hasDecl(std.json, "stringify")) {
             // Zig 0.14.1 API
             var out: std.ArrayListUnmanaged(u8) = .{};
             defer out.deinit(a);
-            try std.json.stringify(args_v.*, .{}, out.writer(a));
-            break :blk try out.toOwnedSlice(a);
+            std.json.stringify(args_v.*, .{}, out.writer(a)) catch {
+                break :blk try a.dupe(u8, "{}");
+            };
+            break :blk out.toOwnedSlice(a) catch try a.dupe(u8, "{}");
         } else {
             // Fallback: return empty JSON object if no stringify available
             break :blk try a.dupe(u8, "{}");
