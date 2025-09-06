@@ -7,7 +7,9 @@ const server = @import("../server.zig");
 const A = std.testing.allocator;
 
 const DummyCtx = struct { dummy: u8 };
-fn execDummy(ctx: *DummyCtx, _: *core.CommandQueue) !void { _ = ctx; }
+fn execDummy(ctx: *DummyCtx, _: *core.CommandQueue) !void {
+    _ = ctx;
+}
 
 fn factory_make_counter(allocator: std.mem.Allocator, args: [2]?*anyopaque) anyerror!core.Command {
     _ = args; // ignore
@@ -66,7 +68,6 @@ test "Endpoint: InterpretCommand resolves operation via IoC map and enqueues int
     t.tprint("Interpret: pending before={}, after={}\n", .{ before, after });
     try std.testing.expect(after == before + 1);
 }
-
 
 // --- Additional endpoint tests ---
 

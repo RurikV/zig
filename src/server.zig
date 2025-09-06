@@ -33,7 +33,9 @@ pub const OpRouter = struct {
     // simple string hashmap mapping operation_id to IoC key
     map: std.StringHashMapUnmanaged([]const u8) = .{},
 
-    pub fn init() OpRouter { return .{}; }
+    pub fn init() OpRouter {
+        return .{};
+    }
     pub fn deinit(self: *OpRouter, a: Allocator) void {
         var it = self.map.iterator();
         while (it.next()) |kv| {
@@ -59,7 +61,9 @@ pub const GameRuntime = struct {
         const w = threading.Worker.init(a);
         return .{ .worker = w };
     }
-    pub fn deinit(self: *GameRuntime) void { self.worker.deinit(); }
+    pub fn deinit(self: *GameRuntime) void {
+        self.worker.deinit();
+    }
 };
 
 // Registry of games (routing by game_id)
@@ -68,7 +72,9 @@ pub const GameRegistry = struct {
     mtx: std.Thread.Mutex = .{},
     games: std.StringHashMapUnmanaged(GameRuntime) = .{},
 
-    pub fn init(a: Allocator) GameRegistry { return .{ .allocator = a }; }
+    pub fn init(a: Allocator) GameRegistry {
+        return .{ .allocator = a };
+    }
     pub fn deinit(self: *GameRegistry) void {
         var it = self.games.iterator();
         while (it.next()) |kv| {
@@ -127,7 +133,7 @@ pub const InterpretFactory = struct {
         // duplicate message fields to be owned by the command context
         const gid = a.dupe(u8, msg.game_id) catch @panic("OOM");
         const oid = a.dupe(u8, msg.object_id) catch @panic("OOM");
-        const op  = a.dupe(u8, msg.operation_id) catch @panic("OOM");
+        const op = a.dupe(u8, msg.operation_id) catch @panic("OOM");
         const args = a.dupe(u8, msg.args_json) catch @panic("OOM");
         ctx.* = .{ .allocator = a, .registry = registry, .router = router, .msg = .{
             .game_id = gid,
