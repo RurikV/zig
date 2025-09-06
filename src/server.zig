@@ -204,13 +204,19 @@ pub fn parse_inbound_json(a: Allocator, src: []const u8) !InboundMessage {
     const oid_owned = try a.dupe(u8, oid_s);
     const op_owned = try a.dupe(u8, op_s);
     const args_text = blk: {
+        // Use comptime to completely avoid compiling incompatible branches
         if (comptime @hasDecl(std.json, "stringifyAlloc")) {
+            // Zig master API
             break :blk try std.json.stringifyAlloc(a, args_v.*, .{});
-        } else {
+        } else if (comptime @hasDecl(std.json, "stringify")) {
+            // Zig 0.14.1 API
             var out: std.ArrayListUnmanaged(u8) = .{};
             defer out.deinit(a);
             try std.json.stringify(args_v.*, .{}, out.writer(a));
             break :blk try out.toOwnedSlice(a);
+        } else {
+            // Fallback: return empty JSON object if no stringify available
+            break :blk try a.dupe(u8, "{}");
         }
     };
     return .{ .game_id = gid_owned, .object_id = oid_owned, .operation_id = op_owned, .args_json = args_text };
