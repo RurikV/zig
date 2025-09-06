@@ -203,9 +203,13 @@ pub fn parse_inbound_json(a: Allocator, src: []const u8) !InboundMessage {
     const gid_owned = try a.dupe(u8, gid_s);
     const oid_owned = try a.dupe(u8, oid_s);
     const op_owned = try a.dupe(u8, op_s);
-    var out: std.ArrayListUnmanaged(u8) = .{};
-    defer out.deinit(a);
-    try std.json.stringify(args_v.*, .{}, out.writer(a));
-    const args_text = try out.toOwnedSlice(a);
+    const args_text = if (@hasDecl(std.json, "stringifyAlloc"))
+        try std.json.stringifyAlloc(a, args_v.*, .{})
+    else blk: {
+        var out: std.ArrayListUnmanaged(u8) = .{};
+        defer out.deinit(a);
+        try std.json.stringify(args_v.*, .{}, out.writer(a));
+        break :blk try out.toOwnedSlice(a);
+    };
     return .{ .game_id = gid_owned, .object_id = oid_owned, .operation_id = op_owned, .args_json = args_text };
 }
