@@ -207,14 +207,21 @@ fn writeJsonValue(w: anytype, v: std.json.Value) !void {
     switch (v) {
         .null => try w.writeAll("null"),
         .bool => |b| try w.writeAll(if (b) "true" else "false"),
-        .integer => |i| try std.fmt.format(w, "{}", .{i}),
-        .float => |f| try std.fmt.format(w, "{}", .{f}),
+        .integer => |i| {
+            var buf: [64]u8 = undefined;
+            const s = try std.fmt.bufPrint(&buf, "{}", .{i});
+            try w.writeAll(s);
+        },
+        .float => |f| {
+            var buf: [64]u8 = undefined;
+            const s = try std.fmt.bufPrint(&buf, "{}", .{f});
+            try w.writeAll(s);
+        },
         .number_string => |ns| try w.writeAll(ns),
         .string => |s| try writeJsonString(w, s),
         .array => |arr| {
             try w.writeByte('[');
             var first = true;
-            // arr is std.json.Array; iterate items
             for (arr.items) |item| {
                 if (!first) try w.writeByte(',');
                 first = false;
@@ -229,7 +236,6 @@ fn writeJsonValue(w: anytype, v: std.json.Value) !void {
             while (it.next()) |entry| {
                 if (!first) try w.writeByte(',');
                 first = false;
-                // entry has key_ptr and value_ptr in both 0.14 and master
                 try writeJsonString(w, entry.key_ptr.*);
                 try w.writeByte(':');
                 try writeJsonValue(w, entry.value_ptr.*);
@@ -238,6 +244,17 @@ fn writeJsonValue(w: anytype, v: std.json.Value) !void {
         },
     }
 }
+
+const ListWriter = struct {
+    list: *std.ArrayListUnmanaged(u8),
+    allocator: Allocator,
+    pub fn writeAll(self: *ListWriter, data: []const u8) !void {
+        try self.list.appendSlice(self.allocator, data);
+    }
+    pub fn writeByte(self: *ListWriter, b: u8) !void {
+        try self.list.append(self.allocator, b);
+    }
+};
 
 // Simple JSON parser tailored to expected fields; keeps args as raw object slice
 pub fn parse_inbound_json(a: Allocator, src: []const u8) !InboundMessage {
@@ -264,7 +281,8 @@ pub fn parse_inbound_json(a: Allocator, src: []const u8) !InboundMessage {
     // Build args JSON deterministically using local serializer (compact, no spaces)
     var out: std.ArrayListUnmanaged(u8) = .{};
     errdefer out.deinit(a);
-    try writeJsonValue(out.writer(a), args_v.*);
+    var lw = ListWriter{ .list = &out, .allocator = a };
+    try writeJsonValue(&lw, args_v.*);
     const args_text = try out.toOwnedSlice(a);
     return .{ .game_id = gid_owned, .object_id = oid_owned, .operation_id = op_owned, .args_json = args_text };
 }
