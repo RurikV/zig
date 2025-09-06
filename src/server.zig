@@ -185,6 +185,60 @@ pub fn run_server(a: Allocator, reg: *GameRegistry, router: *const OpRouter, add
     }
 }
 
+// Simple JSON serializer for std.json.Value to ensure cross-version stability
+fn writeJsonString(w: anytype, s: []const u8) !void {
+    try w.writeByte('"');
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            else => try w.writeByte(c),
+        }
+    }
+    try w.writeByte('"');
+}
+
+fn writeJsonValue(w: anytype, v: std.json.Value) !void {
+    switch (v) {
+        .null => try w.writeAll("null"),
+        .bool => |b| try w.writeAll(if (b) "true" else "false"),
+        .integer => |i| try std.fmt.format(w, "{}", .{i}),
+        .float => |f| try std.fmt.format(w, "{}", .{f}),
+        .number_string => |ns| try w.writeAll(ns),
+        .string => |s| try writeJsonString(w, s),
+        .array => |arr| {
+            try w.writeByte('[');
+            var first = true;
+            // arr is std.json.Array; iterate items
+            for (arr.items) |item| {
+                if (!first) try w.writeByte(',');
+                first = false;
+                try writeJsonValue(w, item);
+            }
+            try w.writeByte(']');
+        },
+        .object => |obj| {
+            try w.writeByte('{');
+            var it = obj.iterator();
+            var first = true;
+            while (it.next()) |entry| {
+                if (!first) try w.writeByte(',');
+                first = false;
+                // entry has key_ptr and value_ptr in both 0.14 and master
+                try writeJsonString(w, entry.key_ptr.*);
+                try w.writeByte(':');
+                try writeJsonValue(w, entry.value_ptr.*);
+            }
+            try w.writeByte('}');
+        },
+    }
+}
+
 // Simple JSON parser tailored to expected fields; keeps args as raw object slice
 pub fn parse_inbound_json(a: Allocator, src: []const u8) !InboundMessage {
     var parsed = try std.json.parseFromSlice(std.json.Value, a, src, .{});
@@ -207,32 +261,10 @@ pub fn parse_inbound_json(a: Allocator, src: []const u8) !InboundMessage {
     const op_owned = try a.dupe(u8, op_s);
     errdefer a.free(op_owned);
 
-    // Use a more robust approach for JSON stringification
-    const args_text = blk: {
-        if (comptime @hasDecl(std.json, "stringifyAlloc")) {
-            // Try stringifyAlloc first (Zig master API)
-            break :blk std.json.stringifyAlloc(a, args_v.*, .{}) catch |err| {
-                // If stringifyAlloc fails, try the manual approach
-                if (comptime @hasDecl(std.json, "stringify")) {
-                    var out: std.ArrayListUnmanaged(u8) = .{};
-                    errdefer out.deinit(a);
-                    try std.json.stringify(args_v.*, .{}, out.writer(a));
-                    break :blk try out.toOwnedSlice(a);
-                } else {
-                    // If no stringify available, propagate the error
-                    return err;
-                }
-            };
-        } else if (comptime @hasDecl(std.json, "stringify")) {
-            // Use the manual approach (Zig 0.14.1 API)
-            var out: std.ArrayListUnmanaged(u8) = .{};
-            errdefer out.deinit(a);
-            try std.json.stringify(args_v.*, .{}, out.writer(a));
-            break :blk try out.toOwnedSlice(a);
-        } else {
-            // No JSON stringify available
-            return error.JsonStringifyUnavailable;
-        }
-    };
+    // Build args JSON deterministically using local serializer (compact, no spaces)
+    var out: std.ArrayListUnmanaged(u8) = .{};
+    errdefer out.deinit(a);
+    try writeJsonValue(out.writer(a), args_v.*);
+    const args_text = try out.toOwnedSlice(a);
     return .{ .game_id = gid_owned, .object_id = oid_owned, .operation_id = op_owned, .args_json = args_text };
 }
