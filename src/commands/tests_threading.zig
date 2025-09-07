@@ -20,6 +20,12 @@ fn execNoop(_: *NoopCtx, _: *CommandQueue) !void {
     return;
 }
 
+// Small delay command to stabilize timing-sensitive tests
+const SleepCtx = struct { ns: u64 };
+fn execSleep(ctx: *SleepCtx, _: *CommandQueue) !void {
+    std.time.sleep(ctx.ns);
+}
+
 // Helper to drain a simple queue of commands by executing them directly (single-threaded)
 fn runQueue(q: *CommandQueue) void {
     while (q.popFront()) |cmd| {
@@ -71,16 +77,22 @@ test "Threading: hard stop stops without draining remaining tasks" {
     runQueue(&q);
     w.waitStarted();
 
-    // Enqueue several tasks
+    // Enqueue an initial small sleep job to delay processing the batch,
+    // making the hard-stop assertion deterministic even on fast runners.
+    const SleepMaker = CommandFactory(SleepCtx, execSleep);
+    const sleep_ctx = try alloc.create(SleepCtx);
+    sleep_ctx.* = .{ .ns = 5 * std.time.ns_per_ms };
+    const sleep_cmd = SleepMaker.makeOwned(sleep_ctx, .flaky, false, false);
+    w.enqueue(sleep_cmd);
+
+    // Enqueue several increment tasks
     var counter: usize = 0;
     const Maker = CommandFactory(IncCtx, execInc);
     const total: usize = 100_000; // large to ensure some remain after hard stop
     var i: usize = 0;
     while (i < total) : (i += 1) {
-        const ctx = IncCtx{ .counter = &counter };
-        // allocate owned context to avoid stack pointer lifetime issues
         const heap_ctx = try alloc.create(IncCtx);
-        heap_ctx.* = ctx;
+        heap_ctx.* = .{ .counter = &counter };
         const cmd = Maker.makeOwned(heap_ctx, .flaky, false, false);
         w.enqueue(cmd);
     }
