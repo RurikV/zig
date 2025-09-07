@@ -23,7 +23,7 @@ fn execNoop(_: *NoopCtx, _: *CommandQueue) !void {
 // Small delay command to stabilize timing-sensitive tests
 const SleepCtx = struct { ns: u64 };
 fn execSleep(ctx: *SleepCtx, _: *CommandQueue) !void {
-    std.time.sleep(ctx.ns);
+    std.Thread.sleep(ctx.ns);
 }
 
 // Helper to drain a simple queue of commands by executing them directly (single-threaded)
