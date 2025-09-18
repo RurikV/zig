@@ -607,3 +607,10 @@ pub fn demo(alloc: std.mem.Allocator) !void {
 }
 ```
 
+## Architecture: Space Battle Microservices
+
+A proposed microservices architecture for the Space Battle game (services, message flows, endpoints, bottlenecks, OCP strategies, and explanations) is documented here:
+- docs/space-battle-microservices.md
+
+Note: Diagrams are written in Mermaid. Use a viewer or Markdown renderer with Mermaid support to visualize them.
+
