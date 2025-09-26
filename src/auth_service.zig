@@ -148,7 +148,6 @@ pub fn run_auth_service(a: Allocator, address: []const u8) !void {
         const body_off = he;
         const body = if (body_off + cl <= buf.items.len) buf.items[body_off .. body_off + cl] else buf.items[body_off..];
 
-
         if (!std.mem.eql(u8, method, "POST")) {
             try writer.print("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
             continue;
