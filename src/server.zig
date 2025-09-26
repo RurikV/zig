@@ -181,14 +181,14 @@ pub fn run_server(a: Allocator, reg: *GameRegistry, router: *const OpRouter, add
         }{ .s = &conn.stream, .a = a };
 
         // Read headers and body into buffer
-        var buf = std.ArrayList(u8).init(a);
-        defer buf.deinit();
+        var buf: std.ArrayListUnmanaged(u8) = .{};
+        defer buf.deinit(a);
         var tmp: [4096]u8 = undefined;
         var head_end: ?usize = null;
         while (true) {
             const n = try reader.read(&tmp);
             if (n == 0) break;
-            try buf.appendSlice(tmp[0..n]);
+            try buf.appendSlice(a, tmp[0..n]);
             if (head_end == null) {
                 if (std.mem.indexOf(u8, buf.items, "\r\n\r\n")) |pos| head_end = pos + 4 else continue;
             }
@@ -406,14 +406,14 @@ pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter
             }
         }{ .s = &conn.stream, .a = a };
 
-        var buf = std.ArrayList(u8).init(a);
-        defer buf.deinit();
+        var buf: std.ArrayListUnmanaged(u8) = .{};
+        defer buf.deinit(a);
         var tmp: [4096]u8 = undefined;
         var head_end: ?usize = null;
         while (true) {
             const n = try reader.read(&tmp);
             if (n == 0) break;
-            try buf.appendSlice(tmp[0..n]);
+            try buf.appendSlice(a, tmp[0..n]);
             if (head_end == null) {
                 if (std.mem.indexOf(u8, buf.items, "\r\n\r\n")) |pos| head_end = pos + 4 else continue;
             }
