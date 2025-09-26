@@ -288,7 +288,6 @@ pub fn parse_inbound_json(a: Allocator, src: []const u8) !InboundMessage {
     return .{ .game_id = gid_owned, .object_id = oid_owned, .operation_id = op_owned, .args_json = args_text };
 }
 
-
 // Authorization: verify JWT token against inbound message's game_id. Returns subject (user) on success.
 pub const AuthzError = error{ InvalidToken, Forbidden };
 
@@ -302,4 +301,78 @@ pub fn verifyJwtForMessage(a: Allocator, secret: []const u8, token: []const u8, 
     defer jwt.freeClaims(a, claims);
     if (!std.mem.eql(u8, claims.game_id, msg.game_id)) return AuthzError.Forbidden;
     return try a.dupe(u8, claims.sub);
+}
+
+// HTTP endpoint with JWT auth (expects Authorization: Bearer <token>)
+pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter, address: []const u8, secret: []const u8) !void {
+    var server = std.http.Server.init(.{ .reuse_address = true });
+    defer server.deinit();
+
+    var addr = try std.net.Address.resolveIp(address, 0);
+    addr.in.setPort(8080);
+    try server.listen(addr);
+
+    while (true) {
+        var conn = try server.accept();
+        defer conn.deinit();
+        var buf_reader = std.io.bufferedReader(conn.stream.reader());
+        var req = try std.http.Server.Request.init(conn, buf_reader.reader());
+        defer req.deinit();
+        try req.wait();
+
+        if (req.method != .POST or !std.mem.eql(u8, req.head.target, "/message")) {
+            try req.respond(.{ .status = .not_found, .reason = "Not Found" });
+            continue;
+        }
+
+        const authz = req.head.headers.getFirstValue("authorization") orelse {
+            try req.respond(.{ .status = .unauthorized, .reason = "Unauthorized" });
+            continue;
+        };
+        const prefix = "Bearer ";
+        if (authz.len <= prefix.len or !std.mem.startsWith(u8, authz, prefix)) {
+            try req.respond(.{ .status = .unauthorized, .reason = "Unauthorized" });
+            continue;
+        }
+        const token = authz[prefix.len..];
+
+        const body = try req.reader().readAllAlloc(a, 1 << 20);
+        defer a.free(body);
+        const parsed = parse_inbound_json(a, body) catch |e| {
+            const msg = std.fmt.allocPrint(a, "Error: {s}", .{@errorName(e)}) catch body;
+            _ = req.respond(.{ .status = .bad_request, .reason = "Bad Request", .body = msg }) catch {};
+            if (msg.ptr != body.ptr) a.free(msg);
+            continue;
+        };
+        defer free_inbound_message(a, parsed);
+
+        const _user = verifyJwtForMessage(a, secret, token, parsed) catch |e| {
+            switch (e) {
+                AuthzError.InvalidToken => {
+                    try req.respond(.{ .status = .unauthorized, .reason = "Unauthorized" });
+                    continue;
+                },
+                AuthzError.Forbidden => {
+                    try req.respond(.{ .status = .forbidden, .reason = "Forbidden" });
+                    continue;
+                },
+                else => {
+                    try req.respond(.{ .status = .unauthorized, .reason = "Unauthorized" });
+                    continue;
+                },
+            }
+        };
+        a.free(_user);
+
+        const cmd = InterpretFactory.make(a, reg, router, parsed);
+        var q = core.CommandQueue.init(a);
+        defer q.deinit();
+        _ = cmd.call(cmd.ctx, &q) catch |e| {
+            const msg = std.fmt.allocPrint(a, "Error: {s}", .{@errorName(e)}) catch body;
+            _ = req.respond(.{ .status = .bad_request, .reason = "Bad Request", .body = msg }) catch {};
+            if (msg.ptr != body.ptr) a.free(msg);
+            continue;
+        };
+        try req.respond(.{ .status = .ok, .reason = "OK" });
+    }
 }

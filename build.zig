@@ -65,6 +65,23 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
 
+    // Additional executables: Auth Service and Game Server (microservices)
+    const auth_exe = b.addExecutable(.{
+        .name = "auth-service",
+        .root_source_file = b.path("src/main_auth.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(auth_exe);
+
+    const game_exe = b.addExecutable(.{
+        .name = "game-server",
+        .root_source_file = b.path("src/main_game.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    b.installArtifact(game_exe);
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).

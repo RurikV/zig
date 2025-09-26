@@ -670,3 +670,85 @@ Configuration
 Notes
 - AuthStore is an in-memory helper for tests and demos; back it with persistent storage or a standalone service for production.
 - The Game Server endpoint remains generic: it only parses messages and enqueues domain commands. Authorization is orthogonal and can be enforced before interpreting/enqueuing.
+
+
+
+## Microservices: Auth Service and Game Server (HTTP)
+
+This repository now includes two small HTTP microservices that communicate using JWT:
+- Auth Service: issues game IDs and JWT tokens to authorized participants.
+- Game Server: accepts commands only when a valid JWT for the target game is provided.
+
+Executables (built by `zig build`):
+- zig-out/bin/auth-service — listens on 0.0.0.0:8081
+- zig-out/bin/game-server — listens on 0.0.0.0:8080
+
+Configuration:
+- JWT secret: environment variable JWT_SECRET (default fallback is "dev-secret").
+
+Run locally (two terminals):
+```bash
+# Terminal 1: start the Auth Service (port 8081)
+export JWT_SECRET=my-very-secret
+zig build && ./zig-out/bin/auth-service
+```
+```bash
+# Terminal 2: start the Game Server (port 8080)
+# Uses the same JWT_SECRET to verify incoming tokens
+export JWT_SECRET=my-very-secret
+zig build && ./zig-out/bin/game-server
+```
+
+Auth Service HTTP API
+- POST /games
+  - Request JSON: {"participants":["alice","bob"]} or {"participants":[...],"game_id":"g-42"}
+  - Response 201: {"game_id":"g-1"}
+- POST /token
+  - Request JSON: {"user":"alice","game_id":"g-1"}
+  - Response 200: {"token":"<jwt>"}
+
+Quick demo with curl
+```bash
+# 1) Create a game and capture its id
+GAME=$(curl -s -X POST http://localhost:8081/games \
+  -H 'Content-Type: application/json' \
+  -d '{"participants":["alice","bob"]}')
+echo "$GAME"  # {"game_id":"g-1"}
+GAME_ID=$(echo "$GAME" | sed -E 's/.*"game_id":"([^"]+)".*/\1/')
+
+# 2) Issue a token for participant alice
+TOK=$(curl -s -X POST http://localhost:8081/token \
+  -H 'Content-Type: application/json' \
+  -d '{"user":"alice","game_id":"'"$GAME_ID"'"}')
+echo "$TOK"   # {"token":"<jwt>"}
+TOKEN=$(echo "$TOK" | sed -E 's/.*"token":"([^"]+)".*/\1/')
+
+# 3) Call the Game Server with Authorization: Bearer <jwt>
+# The demo server maps operation_id "noop" to a safe built-in IoC admin op.
+curl -i -X POST http://localhost:8080/message \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"game_id":"'"$GAME_ID"'","object_id":"obj-1","operation_id":"noop","args":{}}'
+```
+
+Message format accepted by Game Server
+- POST /message
+- JSON body with fields:
+  - game_id: string
+  - object_id: string
+  - operation_id: string (looked up in an internal router to find an IoC key)
+  - args: JSON object (opaque to the endpoint; parsed by the domain command)
+- Authorization header is required: Bearer <jwt>
+
+Extend with real game operations
+- In your runtime, register IoC factories for domain operations and map external operation_id values to your IoC keys using OpRouter.
+- See src/server.zig (OpRouter, GameRegistry, run_server_auth) and src/commands/* for IoC and command queues.
+
+Related files
+- src/auth_service.zig — HTTP Auth Service implementation (POST /games, POST /token)
+- src/main_auth.zig — Auth Service entry point
+- src/main_game.zig — Game Server entry point; minimal router wiring and JWT secret loading
+- src/server.zig — Endpoint, message parsing, game routing, and run_server_auth
+- src/auth.zig — In-memory AuthStore (games and participants)
+- src/jwt.zig — HS256 JWT encode/verify utilities
+- docs/space-battle-microservices.md — Architecture document and diagrams

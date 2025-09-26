@@ -29,7 +29,9 @@ pub const AuthStore = struct {
     games: std.StringHashMapUnmanaged(Game) = .{},
     next_id: u64 = 1,
 
-    pub fn init(a: Allocator) AuthStore { return .{ .allocator = a }; }
+    pub fn init(a: Allocator) AuthStore {
+        return .{ .allocator = a };
+    }
 
     pub fn deinit(self: *AuthStore) void {
         var it = self.games.iterator();
@@ -84,7 +86,7 @@ test "AuthStore: NotParticipant error" {
     const A = std.testing.allocator;
     var store = AuthStore.init(A);
     defer store.deinit();
-    const gid = try store.createGame(&[_][]const u8{ "alice" }, "g42");
+    const gid = try store.createGame(&[_][]const u8{"alice"}, "g42");
     defer A.free(gid);
     try std.testing.expectError(error.NotParticipant, store.issueToken(A, "s", "mallory", gid));
 }

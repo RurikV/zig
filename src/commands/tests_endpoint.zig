@@ -165,7 +165,6 @@ test "Endpoint: InterpretFactory drop frees owned message safely" {
     t.tprint("InterpretFactory drop path: OK\n", .{});
 }
 
-
 // --- JWT verification integration tests ---
 
 test "Server: verifyJwtForMessage accepts valid token for same game" {
