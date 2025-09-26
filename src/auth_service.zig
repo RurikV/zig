@@ -96,7 +96,12 @@ pub fn run_auth_service(a: Allocator, address: []const u8) !void {
     while (true) {
         var conn = try listener.accept();
         defer conn.stream.close();
-        var reader = struct { s: *std.net.Stream, fn read(self: *@This(), buf: []u8) !usize { return self.s.read(buf); } }{ .s = &conn.stream };
+        var reader = struct {
+            s: *std.net.Stream,
+            fn read(self: *@This(), buf: []u8) !usize {
+                return self.s.read(buf);
+            }
+        }{ .s = &conn.stream };
         var writer = struct {
             s: *std.net.Stream,
             a: Allocator,

@@ -156,7 +156,12 @@ pub fn run_server(a: Allocator, reg: *GameRegistry, router: *const OpRouter, add
     while (true) {
         var conn = try listener.accept();
         defer conn.stream.close();
-        var reader = struct { s: *std.net.Stream, fn read(self: *@This(), buf: []u8) !usize { return self.s.read(buf); } }{ .s = &conn.stream };
+        var reader = struct {
+            s: *std.net.Stream,
+            fn read(self: *@This(), buf: []u8) !usize {
+                return self.s.read(buf);
+            }
+        }{ .s = &conn.stream };
         var writer = struct {
             s: *std.net.Stream,
             a: Allocator,
@@ -377,7 +382,12 @@ pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter
     while (true) {
         var conn = try listener.accept();
         defer conn.stream.close();
-        var reader = struct { s: *std.net.Stream, fn read(self: *@This(), buf: []u8) !usize { return self.s.read(buf); } }{ .s = &conn.stream };
+        var reader = struct {
+            s: *std.net.Stream,
+            fn read(self: *@This(), buf: []u8) !usize {
+                return self.s.read(buf);
+            }
+        }{ .s = &conn.stream };
         var writer = struct {
             s: *std.net.Stream,
             a: Allocator,
