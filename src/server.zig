@@ -156,8 +156,24 @@ pub fn run_server(a: Allocator, reg: *GameRegistry, router: *const OpRouter, add
     while (true) {
         var conn = try listener.accept();
         defer conn.stream.close();
-        var reader = conn.stream.reader();
-        var writer = conn.stream.writer();
+        var reader = struct { s: *std.net.Stream, fn read(self: *@This(), buf: []u8) !usize { return self.s.read(buf); } }{ .s = &conn.stream };
+        var writer = struct {
+            s: *std.net.Stream,
+            a: Allocator,
+            fn writeAll(self: *@This(), data: []const u8) !void {
+                var off: usize = 0;
+                while (off < data.len) {
+                    const n = try self.s.write(data[off..]);
+                    if (n == 0) break;
+                    off += n;
+                }
+            }
+            fn print(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+                const buf = try std.fmt.allocPrint(self.a, fmt, args);
+                defer self.a.free(buf);
+                try self.writeAll(buf);
+            }
+        }{ .s = &conn.stream, .a = a };
 
         // Read headers and body into buffer
         var buf = std.ArrayList(u8).init(a);
@@ -361,8 +377,24 @@ pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter
     while (true) {
         var conn = try listener.accept();
         defer conn.stream.close();
-        var reader = conn.stream.reader();
-        var writer = conn.stream.writer();
+        var reader = struct { s: *std.net.Stream, fn read(self: *@This(), buf: []u8) !usize { return self.s.read(buf); } }{ .s = &conn.stream };
+        var writer = struct {
+            s: *std.net.Stream,
+            a: Allocator,
+            fn writeAll(self: *@This(), data: []const u8) !void {
+                var off: usize = 0;
+                while (off < data.len) {
+                    const n = try self.s.write(data[off..]);
+                    if (n == 0) break;
+                    off += n;
+                }
+            }
+            fn print(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+                const buf = try std.fmt.allocPrint(self.a, fmt, args);
+                defer self.a.free(buf);
+                try self.writeAll(buf);
+            }
+        }{ .s = &conn.stream, .a = a };
 
         var buf = std.ArrayList(u8).init(a);
         defer buf.deinit();
