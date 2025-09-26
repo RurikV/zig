@@ -77,13 +77,12 @@ fn parseIssueTokenRequest(a: Allocator, body: []const u8) !struct { user: []cons
 }
 
 pub fn run_auth_service(a: Allocator, address: []const u8) !void {
-    var server = std.http.Server.init(.{ .reuse_address = true });
-    defer server.deinit();
+    // Minimal HTTP/1.1 loop using TCP sockets for Zig version compatibility
+    var listener = std.net.Server.init(.{ .reuse_address = true });
+    defer listener.deinit();
 
-    var addr = try std.net.Address.resolveIp(address, 0);
-    // default to 8081 for auth service
-    addr.in.setPort(8081);
-    try server.listen(addr);
+    var addr = try std.net.Address.resolveIp(address, 8081);
+    try listener.listen(addr);
 
     var store = auth.AuthStore.init(a);
     defer store.deinit();
@@ -93,25 +92,80 @@ pub fn run_auth_service(a: Allocator, address: []const u8) !void {
     defer if (secret_is_owned) a.free(secret);
 
     while (true) {
-        var conn = try server.accept();
-        defer conn.deinit();
-        var buf_reader = std.io.bufferedReader(conn.stream.reader());
-        var req = try std.http.Server.Request.init(conn, buf_reader.reader());
-        defer req.deinit();
-        try req.wait();
+        var conn = try listener.accept();
+        defer conn.stream.close();
+        var reader = conn.stream.reader();
+        var writer = conn.stream.writer();
 
-        if (req.method == .POST and std.mem.eql(u8, req.head.target, "/games")) {
-            const body = try req.reader().readAllAlloc(a, 1 << 20);
-            defer a.free(body);
+        // Read headers then body
+        var buf = std.ArrayList(u8).init(a);
+        defer buf.deinit();
+        var tmp: [4096]u8 = undefined;
+        var head_end: ?usize = null;
+        while (true) {
+            const n = try reader.read(&tmp);
+            if (n == 0) break;
+            try buf.appendSlice(tmp[0..n]);
+            if (head_end == null) {
+                if (std.mem.indexOf(u8, buf.items, "\r\n\r\n")) |pos| head_end = pos + 4 else continue;
+            }
+            const head = buf.items[0..head_end.?];
+            // find Content-Length
+            var cl: usize = 0;
+            var it = std.mem.splitSequence(u8, head, "\r\n");
+            _ = it.next(); // request line
+            while (it.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "Content-Length:")) {
+                    var s = std.mem.trim(u8, line["Content-Length:".len..], " ");
+                    cl = std.fmt.parseInt(usize, s, 10) catch 0;
+                }
+            }
+            const have = buf.items.len - head_end.?;
+            if (have >= cl) break;
+        }
+
+        const he = head_end orelse buf.items.len;
+        const head = buf.items[0..he];
+        // Parse request line
+        var it = std.mem.splitSequence(u8, head, "\r\n");
+        const req_line = it.next() orelse "";
+        var it2 = std.mem.splitScalar(u8, req_line, ' ');
+        const method = it2.next() orelse "";
+        const target = it2.next() orelse "";
+
+        // Determine body length
+        var cl: usize = 0;
+        var hscan = std.mem.splitSequence(u8, head, "\r\n");
+        _ = hscan.next();
+        while (hscan.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "Content-Length:")) {
+                var s = std.mem.trim(u8, line["Content-Length:".len..], " ");
+                cl = std.fmt.parseInt(usize, s, 10) catch 0;
+            }
+        }
+        const body_off = he;
+        const body = if (body_off + cl <= buf.items.len) buf.items[body_off .. body_off + cl] else buf.items[body_off..];
+
+
+        if (!std.mem.eql(u8, method, "POST")) {
+            try writer.print("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
+            continue;
+        }
+
+        if (std.mem.eql(u8, target, "/games")) {
             const parsed = parseCreateGameRequest(a, body) catch |e| {
                 const msg = jsonError(a, @errorName(e));
-                _ = req.respond(.{ .status = .bad_request, .reason = "Bad Request", .body = msg }) catch {};
+                try writer.print("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+                try writer.writeAll(msg);
                 a.free(msg);
                 continue;
             };
             const gid = store.createGame(parsed.participants, parsed.game_id) catch |e| {
                 const msg = jsonError(a, @errorName(e));
-                _ = req.respond(.{ .status = .internal_server_error, .reason = "Internal", .body = msg }) catch {};
+                try writer.print("HTTP/1.1 500 Internal\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+                try writer.writeAll(msg);
                 a.free(msg);
                 continue;
             };
@@ -122,36 +176,37 @@ pub fn run_auth_service(a: Allocator, address: []const u8) !void {
             try writeJsonString(&w, gid);
             try w.writeAll("}");
             const body_out = try out.toOwnedSlice(a);
-            try req.respond(.{ .status = .created, .reason = "Created", .body = body_out });
+            try writer.print("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body_out.len});
+            try writer.writeAll(body_out);
             a.free(body_out);
             continue;
-        }
-
-        if (req.method == .POST and std.mem.eql(u8, req.head.target, "/token")) {
-            const body = try req.reader().readAllAlloc(a, 1 << 20);
-            defer a.free(body);
+        } else if (std.mem.eql(u8, target, "/token")) {
             const parsed = parseIssueTokenRequest(a, body) catch |e| {
                 const msg = jsonError(a, @errorName(e));
-                _ = req.respond(.{ .status = .bad_request, .reason = "Bad Request", .body = msg }) catch {};
+                try writer.print("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+                try writer.writeAll(msg);
                 a.free(msg);
                 continue;
             };
             const tok = store.issueToken(a, secret, parsed.user, parsed.game_id) catch |e| switch (e) {
-                error.UnknownGame => blk: {
+                error.UnknownGame => {
                     const msg = jsonError(a, "UnknownGame");
-                    _ = req.respond(.{ .status = .not_found, .reason = "Not Found", .body = msg }) catch {};
+                    try writer.print("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+                    try writer.writeAll(msg);
                     a.free(msg);
                     continue;
                 },
-                error.NotParticipant => blk: {
+                error.NotParticipant => {
                     const msg = jsonError(a, "NotParticipant");
-                    _ = req.respond(.{ .status = .forbidden, .reason = "Forbidden", .body = msg }) catch {};
+                    try writer.print("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+                    try writer.writeAll(msg);
                     a.free(msg);
                     continue;
                 },
-                else => blk: {
+                else => {
                     const msg = jsonError(a, @errorName(e));
-                    _ = req.respond(.{ .status = .internal_server_error, .reason = "Internal", .body = msg }) catch {};
+                    try writer.print("HTTP/1.1 500 Internal\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+                    try writer.writeAll(msg);
                     a.free(msg);
                     continue;
                 },
@@ -163,11 +218,13 @@ pub fn run_auth_service(a: Allocator, address: []const u8) !void {
             try writeJsonString(&w, tok);
             try w.writeAll("}");
             const body_out = try out.toOwnedSlice(a);
-            try req.respond(.{ .status = .ok, .reason = "OK", .body = body_out });
+            try writer.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{body_out.len});
+            try writer.writeAll(body_out);
             a.free(body_out);
             continue;
+        } else {
+            try writer.print("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
+            continue;
         }
-
-        try req.respond(.{ .status = .not_found, .reason = "Not Found" });
     }
 }

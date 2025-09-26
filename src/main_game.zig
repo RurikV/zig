@@ -21,8 +21,10 @@ pub fn main() !void {
     const scope: []const u8 = "prod";
     var q = core.CommandQueue.init(A);
     defer q.deinit();
-    (try IoC.Resolve(A, "Scopes.New", @ptrCast(@constCast(&scope)), null)).call(@ptrCast(0), &q) catch {};
-    (try IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&scope)), null)).call(@ptrCast(0), &q) catch {};
+    const cnew = try IoC.Resolve(A, "Scopes.New", @ptrCast(@constCast(&scope)), null);
+    cnew.call(cnew.ctx, &q) catch {};
+    const ccur = try IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&scope)), null);
+    ccur.call(ccur.ctx, &q) catch {};
 
     // Load JWT secret (env JWT_SECRET or fallback)
     const secret = jwt.defaultSecret(A);

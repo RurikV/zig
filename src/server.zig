@@ -148,41 +148,91 @@ pub const InterpretFactory = struct {
 
 // HTTP endpoint (std.http.Server) that accepts POST /message with JSON body
 pub fn run_server(a: Allocator, reg: *GameRegistry, router: *const OpRouter, address: []const u8) !void {
-    var server = std.http.Server.init(.{ .reuse_address = true });
-    defer server.deinit();
+    // Minimal HTTP/1.1 loop using TCP sockets for Zig version compatibility
+    var listener = std.net.Server.init(.{ .reuse_address = true });
+    defer listener.deinit();
 
-    var addr = try std.net.Address.resolveIp(address, 0);
-    // default to 8080 if not provided in address
-    addr.in.setPort(8080);
-    try server.listen(addr);
+    const addr = try std.net.Address.resolveIp(address, 8080);
+    try listener.listen(addr);
 
     while (true) {
-        var conn = try server.accept();
-        defer conn.deinit();
-        var buf_reader = std.io.bufferedReader(conn.stream.reader());
-        var req = try std.http.Server.Request.init(conn, buf_reader.reader());
-        defer req.deinit();
-        try req.wait();
-        if (req.method != .POST or !std.mem.eql(u8, req.head.target, "/message")) {
-            try req.respond(.{ .status = .not_found, .reason = "Not Found" });
+        var conn = try listener.accept();
+        defer conn.stream.close();
+        var reader = conn.stream.reader();
+        var writer = conn.stream.writer();
+
+        // Read headers and body into buffer
+        var buf = std.ArrayList(u8).init(a);
+        defer buf.deinit();
+        var tmp: [4096]u8 = undefined;
+        var head_end: ?usize = null;
+        while (true) {
+            const n = try reader.read(&tmp);
+            if (n == 0) break;
+            try buf.appendSlice(tmp[0..n]);
+            if (head_end == null) {
+                if (std.mem.indexOf(u8, buf.items, "\r\n\r\n")) |pos| head_end = pos + 4 else continue;
+            }
+            // compute content-length
+            var cl: usize = 0;
+            var it = std.mem.splitSequence(u8, buf.items[0..head_end.?], "\r\n");
+            _ = it.next();
+            while (it.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "Content-Length:")) {
+                    cl = std.fmt.parseInt(usize, std.mem.trim(u8, line["Content-Length:".len..], " "), 10) catch 0;
+                }
+            }
+            const have = buf.items.len - head_end.?;
+            if (have >= cl) break;
+        }
+
+        const he = head_end orelse buf.items.len;
+        const head = buf.items[0..he];
+        // Parse request line
+        var it = std.mem.splitSequence(u8, head, "\r\n");
+        const req_line = it.next() orelse "";
+        var it2 = std.mem.splitScalar(u8, req_line, ' ');
+        const method = it2.next() orelse "";
+        const target = it2.next() orelse "";
+
+        if (!std.mem.eql(u8, method, "POST") or !std.mem.eql(u8, target, "/message")) {
+            try writer.print("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
             continue;
         }
-        // Read body
-        const body = try req.reader().readAllAlloc(a, 1 << 20); // up to 1MB
-        defer a.free(body);
-        const parsed = try parse_inbound_json(a, body);
+
+        // Determine body
+        var cl: usize = 0;
+        var hscan = std.mem.splitSequence(u8, head, "\r\n");
+        _ = hscan.next();
+        while (hscan.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "Content-Length:")) {
+                cl = std.fmt.parseInt(usize, std.mem.trim(u8, line["Content-Length:".len..], " "), 10) catch 0;
+            }
+        }
+        const body = if (he + cl <= buf.items.len) buf.items[he .. he + cl] else buf.items[he..];
+
+        const parsed = parse_inbound_json(a, body) catch |e| {
+            const msg = std.fmt.allocPrint(a, "Error: {s}", .{@errorName(e)}) catch body;
+            try writer.print("HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+            try writer.writeAll(msg);
+            if (msg.ptr != body.ptr) a.free(msg);
+            continue;
+        };
         defer free_inbound_message(a, parsed);
+
         const cmd = InterpretFactory.make(a, reg, router, parsed);
-        // Enqueue interpret onto a fast local queue to avoid blocking HTTP; execute immediately
         var q = core.CommandQueue.init(a);
         defer q.deinit();
         _ = cmd.call(cmd.ctx, &q) catch |e| {
             const msg = std.fmt.allocPrint(a, "Error: {s}", .{@errorName(e)}) catch body;
-            _ = req.respond(.{ .status = .bad_request, .reason = "Bad Request", .extra_headers = &.{}, .body = msg }) catch {};
+            try writer.print("HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+            try writer.writeAll(msg);
             if (msg.ptr != body.ptr) a.free(msg);
             continue;
         };
-        try req.respond(.{ .status = .ok, .reason = "OK" });
+        try writer.print("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
     }
 }
 
@@ -305,42 +355,89 @@ pub fn verifyJwtForMessage(a: Allocator, secret: []const u8, token: []const u8, 
 
 // HTTP endpoint with JWT auth (expects Authorization: Bearer <token>)
 pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter, address: []const u8, secret: []const u8) !void {
-    var server = std.http.Server.init(.{ .reuse_address = true });
-    defer server.deinit();
+    // Minimal HTTP/1.1 loop with Authorization: Bearer <jwt>
+    var listener = std.net.Server.init(.{ .reuse_address = true });
+    defer listener.deinit();
 
-    var addr = try std.net.Address.resolveIp(address, 0);
-    addr.in.setPort(8080);
-    try server.listen(addr);
+    const addr = try std.net.Address.resolveIp(address, 8080);
+    try listener.listen(addr);
 
     while (true) {
-        var conn = try server.accept();
-        defer conn.deinit();
-        var buf_reader = std.io.bufferedReader(conn.stream.reader());
-        var req = try std.http.Server.Request.init(conn, buf_reader.reader());
-        defer req.deinit();
-        try req.wait();
+        var conn = try listener.accept();
+        defer conn.stream.close();
+        var reader = conn.stream.reader();
+        var writer = conn.stream.writer();
 
-        if (req.method != .POST or !std.mem.eql(u8, req.head.target, "/message")) {
-            try req.respond(.{ .status = .not_found, .reason = "Not Found" });
+        var buf = std.ArrayList(u8).init(a);
+        defer buf.deinit();
+        var tmp: [4096]u8 = undefined;
+        var head_end: ?usize = null;
+        while (true) {
+            const n = try reader.read(&tmp);
+            if (n == 0) break;
+            try buf.appendSlice(tmp[0..n]);
+            if (head_end == null) {
+                if (std.mem.indexOf(u8, buf.items, "\r\n\r\n")) |pos| head_end = pos + 4 else continue;
+            }
+            // compute content-length
+            var cltmp: usize = 0;
+            var it = std.mem.splitSequence(u8, buf.items[0..head_end.?], "\r\n");
+            _ = it.next();
+            while (it.next()) |line| {
+                if (line.len == 0) break;
+                if (std.mem.startsWith(u8, line, "Content-Length:")) {
+                    cltmp = std.fmt.parseInt(usize, std.mem.trim(u8, line["Content-Length:".len..], " "), 10) catch 0;
+                }
+            }
+            const have = buf.items.len - head_end.?;
+            if (have >= cltmp) break;
+        }
+
+        const he = head_end orelse buf.items.len;
+        const head = buf.items[0..he];
+        // Parse request line
+        var it = std.mem.splitSequence(u8, head, "\r\n");
+        const req_line = it.next() orelse "";
+        var it2 = std.mem.splitScalar(u8, req_line, ' ');
+        const method = it2.next() orelse "";
+        const target = it2.next() orelse "";
+
+        if (!std.mem.eql(u8, method, "POST") or !std.mem.eql(u8, target, "/message")) {
+            try writer.print("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
             continue;
         }
 
-        const authz = req.head.headers.getFirstValue("authorization") orelse {
-            try req.respond(.{ .status = .unauthorized, .reason = "Unauthorized" });
+        // Extract Authorization header
+        var authz: ?[]const u8 = null;
+        var cl: usize = 0;
+        var hscan = std.mem.splitSequence(u8, head, "\r\n");
+        _ = hscan.next();
+        while (hscan.next()) |line| {
+            if (line.len == 0) break;
+            if (std.mem.startsWith(u8, line, "Authorization:")) {
+                authz = std.mem.trim(u8, line["Authorization:".len..], " ");
+            } else if (std.mem.startsWith(u8, line, "Content-Length:")) {
+                cl = std.fmt.parseInt(usize, std.mem.trim(u8, line["Content-Length:".len..], " "), 10) catch 0;
+            }
+        }
+        const body = if (he + cl <= buf.items.len) buf.items[he .. he + cl] else buf.items[he..];
+
+        if (authz == null) {
+            try writer.print("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
             continue;
-        };
+        }
+        const authv = authz.?;
         const prefix = "Bearer ";
-        if (authz.len <= prefix.len or !std.mem.startsWith(u8, authz, prefix)) {
-            try req.respond(.{ .status = .unauthorized, .reason = "Unauthorized" });
+        if (authv.len <= prefix.len or !std.mem.startsWith(u8, authv, prefix)) {
+            try writer.print("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
             continue;
         }
-        const token = authz[prefix.len..];
+        const token = authv[prefix.len..];
 
-        const body = try req.reader().readAllAlloc(a, 1 << 20);
-        defer a.free(body);
         const parsed = parse_inbound_json(a, body) catch |e| {
             const msg = std.fmt.allocPrint(a, "Error: {s}", .{@errorName(e)}) catch body;
-            _ = req.respond(.{ .status = .bad_request, .reason = "Bad Request", .body = msg }) catch {};
+            try writer.print("HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+            try writer.writeAll(msg);
             if (msg.ptr != body.ptr) a.free(msg);
             continue;
         };
@@ -349,15 +446,15 @@ pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter
         const _user = verifyJwtForMessage(a, secret, token, parsed) catch |e| {
             switch (e) {
                 AuthzError.InvalidToken => {
-                    try req.respond(.{ .status = .unauthorized, .reason = "Unauthorized" });
+                    try writer.print("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
                     continue;
                 },
                 AuthzError.Forbidden => {
-                    try req.respond(.{ .status = .forbidden, .reason = "Forbidden" });
+                    try writer.print("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
                     continue;
                 },
                 else => {
-                    try req.respond(.{ .status = .unauthorized, .reason = "Unauthorized" });
+                    try writer.print("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
                     continue;
                 },
             }
@@ -369,10 +466,11 @@ pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter
         defer q.deinit();
         _ = cmd.call(cmd.ctx, &q) catch |e| {
             const msg = std.fmt.allocPrint(a, "Error: {s}", .{@errorName(e)}) catch body;
-            _ = req.respond(.{ .status = .bad_request, .reason = "Bad Request", .body = msg }) catch {};
+            try writer.print("HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{msg.len});
+            try writer.writeAll(msg);
             if (msg.ptr != body.ptr) a.free(msg);
             continue;
         };
-        try req.respond(.{ .status = .ok, .reason = "OK" });
+        try writer.print("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
     }
 }

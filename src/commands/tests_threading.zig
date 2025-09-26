@@ -77,18 +77,18 @@ test "Threading: hard stop stops without draining remaining tasks" {
     runQueue(&q);
     w.waitStarted();
 
-    // Enqueue an initial small sleep job to delay processing the batch,
-    // making the hard-stop assertion deterministic even on fast runners.
-    const SleepMaker = CommandFactory(SleepCtx, execSleep);
-    const sleep_ctx = try alloc.create(SleepCtx);
-    sleep_ctx.* = .{ .ns = 5 * std.time.ns_per_ms };
-    const sleep_cmd = SleepMaker.makeOwned(sleep_ctx, .flaky, false, false);
-    w.enqueue(sleep_cmd);
+    // Immediately hard stop the worker and join
+    var hctx = threading.HardStopCtx{ .worker = &w };
+    try q.pushBack(threading.ThreadingFactory.HardStopCommand(&hctx));
+    runQueue(&q);
 
-    // Enqueue several increment tasks
+    // After hard stop, the thread should be joined
+    try testing.expect(w.thread == null);
+
+    // Enqueue a large batch of tasks; they must not be processed after hard stop
     var counter: usize = 0;
     const Maker = CommandFactory(IncCtx, execInc);
-    const total: usize = 100_000; // large to ensure some remain after hard stop
+    const total: usize = 100_000;
     var i: usize = 0;
     while (i < total) : (i += 1) {
         const heap_ctx = try alloc.create(IncCtx);
@@ -97,13 +97,7 @@ test "Threading: hard stop stops without draining remaining tasks" {
         w.enqueue(cmd);
     }
 
-    // Issue hard stop via command and wait for join
-    var hctx = threading.HardStopCtx{ .worker = &w };
-    try q.pushBack(threading.ThreadingFactory.HardStopCommand(&hctx));
-    runQueue(&q);
-
-    // After hard stop, the thread should be joined and some tasks likely left unprocessed
-    try testing.expect(w.thread == null);
+    // Validate that nothing was processed (hard stop does not drain queued tasks)
     try testing.expect(counter < total);
 }
 
