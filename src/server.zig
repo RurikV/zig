@@ -149,11 +149,9 @@ pub const InterpretFactory = struct {
 // HTTP endpoint (std.http.Server) that accepts POST /message with JSON body
 pub fn run_server(a: Allocator, reg: *GameRegistry, router: *const OpRouter, address: []const u8) !void {
     // Minimal HTTP/1.1 loop using TCP sockets for Zig version compatibility
-    var listener = std.net.Server.init(.{ .reuse_address = true });
-    defer listener.deinit();
-
     const addr = try std.net.Address.resolveIp(address, 8080);
-    try listener.listen(addr);
+    var listener = try addr.listen(.{ .reuse_address = true });
+    defer listener.deinit();
 
     while (true) {
         var conn = try listener.accept();
@@ -356,11 +354,9 @@ pub fn verifyJwtForMessage(a: Allocator, secret: []const u8, token: []const u8, 
 // HTTP endpoint with JWT auth (expects Authorization: Bearer <token>)
 pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter, address: []const u8, secret: []const u8) !void {
     // Minimal HTTP/1.1 loop with Authorization: Bearer <jwt>
-    var listener = std.net.Server.init(.{ .reuse_address = true });
-    defer listener.deinit();
-
     const addr = try std.net.Address.resolveIp(address, 8080);
-    try listener.listen(addr);
+    var listener = try addr.listen(.{ .reuse_address = true });
+    defer listener.deinit();
 
     while (true) {
         var conn = try listener.accept();

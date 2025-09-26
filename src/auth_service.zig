@@ -33,13 +33,17 @@ const ListWriter = struct {
 };
 
 fn jsonError(a: Allocator, msg: []const u8) []u8 {
-    // Small helper to build {"error":"msg"}
+    // Small helper to build {"error":"msg"}; always returns owned memory.
     var out: std.ArrayListUnmanaged(u8) = .{};
     var w = ListWriter{ .list = &out, .allocator = a };
     w.writeAll("{\"error\":") catch {};
     writeJsonString(&w, msg) catch {};
     w.writeAll("}") catch {};
-    return out.toOwnedSlice(a) catch msg;
+    const owned = out.toOwnedSlice(a) catch null;
+    if (owned) |s| return s;
+    // Fallback: allocate a minimal message
+    const fb = a.dupe(u8, "{\"error\":\"oom\"}") catch (a.alloc(u8, 0) catch unreachable);
+    return fb;
 }
 
 fn parseCreateGameRequest(a: Allocator, body: []const u8) !struct { participants: []const []const u8, game_id: ?[]const u8 } {
@@ -78,11 +82,9 @@ fn parseIssueTokenRequest(a: Allocator, body: []const u8) !struct { user: []cons
 
 pub fn run_auth_service(a: Allocator, address: []const u8) !void {
     // Minimal HTTP/1.1 loop using TCP sockets for Zig version compatibility
-    var listener = std.net.Server.init(.{ .reuse_address = true });
+    const addr = try std.net.Address.resolveIp(address, 8081);
+    var listener = try addr.listen(.{ .reuse_address = true });
     defer listener.deinit();
-
-    var addr = try std.net.Address.resolveIp(address, 8081);
-    try listener.listen(addr);
 
     var store = auth.AuthStore.init(a);
     defer store.deinit();
@@ -117,7 +119,7 @@ pub fn run_auth_service(a: Allocator, address: []const u8) !void {
             while (it.next()) |line| {
                 if (line.len == 0) break;
                 if (std.mem.startsWith(u8, line, "Content-Length:")) {
-                    var s = std.mem.trim(u8, line["Content-Length:".len..], " ");
+                    const s = std.mem.trim(u8, line["Content-Length:".len..], " ");
                     cl = std.fmt.parseInt(usize, s, 10) catch 0;
                 }
             }
@@ -141,7 +143,7 @@ pub fn run_auth_service(a: Allocator, address: []const u8) !void {
         while (hscan.next()) |line| {
             if (line.len == 0) break;
             if (std.mem.startsWith(u8, line, "Content-Length:")) {
-                var s = std.mem.trim(u8, line["Content-Length:".len..], " ");
+                const s = std.mem.trim(u8, line["Content-Length:".len..], " ");
                 cl = std.fmt.parseInt(usize, s, 10) catch 0;
             }
         }
