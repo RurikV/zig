@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("commands/core.zig");
 const threading = @import("commands/threading.zig");
 const IoC = @import("commands/ioc.zig");
+const jwt = @import("jwt.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -285,4 +286,20 @@ pub fn parse_inbound_json(a: Allocator, src: []const u8) !InboundMessage {
     try writeJsonValue(&lw, args_v.*);
     const args_text = try out.toOwnedSlice(a);
     return .{ .game_id = gid_owned, .object_id = oid_owned, .operation_id = op_owned, .args_json = args_text };
+}
+
+
+// Authorization: verify JWT token against inbound message's game_id. Returns subject (user) on success.
+pub const AuthzError = error{ InvalidToken, Forbidden };
+
+pub fn verifyJwtForMessage(a: Allocator, secret: []const u8, token: []const u8, msg: InboundMessage) ![]u8 {
+    const claims = jwt.verifyHS256(a, secret, token) catch |e| {
+        switch (e) {
+            jwt.VerifyError.InvalidToken, jwt.VerifyError.InvalidJson, jwt.VerifyError.InvalidAlg, jwt.VerifyError.SignatureMismatch => return AuthzError.InvalidToken,
+            else => return AuthzError.InvalidToken,
+        }
+    };
+    defer jwt.freeClaims(a, claims);
+    if (!std.mem.eql(u8, claims.game_id, msg.game_id)) return AuthzError.Forbidden;
+    return try a.dupe(u8, claims.sub);
 }

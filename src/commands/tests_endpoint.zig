@@ -3,6 +3,7 @@ const t = @import("../utils/tests/helpers.zig");
 const core = @import("core.zig");
 const IoC = @import("ioc.zig");
 const server = @import("../server.zig");
+const jwt = @import("../jwt.zig");
 
 const A = std.testing.allocator;
 
@@ -162,4 +163,29 @@ test "Endpoint: InterpretFactory drop frees owned message safely" {
     // Do not call; just drop to exercise owned-free path
     if (cmd.drop) |d| d(cmd.ctx, A);
     t.tprint("InterpretFactory drop path: OK\n", .{});
+}
+
+
+// --- JWT verification integration tests ---
+
+test "Server: verifyJwtForMessage accepts valid token for same game" {
+    const secret = "secret";
+    const json = "{\"game_id\":\"g9\",\"object_id\":\"o\",\"operation_id\":\"noop\",\"args\":{}}";
+    const msg = try server.parse_inbound_json(A, json);
+    defer server.free_inbound_message(A, msg);
+    const tok = try jwt.encodeHS256(A, secret, .{ .sub = "alice", .game_id = "g9", .exp = null });
+    defer A.free(tok);
+    const who = try server.verifyJwtForMessage(A, secret, tok, msg);
+    defer A.free(who);
+    try std.testing.expectEqualStrings("alice", who);
+}
+
+test "Server: verifyJwtForMessage forbids token for different game" {
+    const secret = "secret";
+    const json = "{\"game_id\":\"g10\",\"object_id\":\"o\",\"operation_id\":\"noop\",\"args\":{}}";
+    const msg = try server.parse_inbound_json(A, json);
+    defer server.free_inbound_message(A, msg);
+    const tok = try jwt.encodeHS256(A, secret, .{ .sub = "alice", .game_id = "gX", .exp = null });
+    defer A.free(tok);
+    try std.testing.expectError(server.AuthzError.Forbidden, server.verifyJwtForMessage(A, secret, tok, msg));
 }

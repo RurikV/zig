@@ -614,3 +614,59 @@ A proposed microservices architecture for the Space Battle game (services, messa
 
 Note: Diagrams are written in Mermaid. Use a viewer or Markdown renderer with Mermaid support to visualize them.
 
+
+
+## Authorization Microservice (JWT)
+
+This repository includes a minimal authorization service and JWT utilities to support the Space Battle microservices flow:
+- Organizer creates a game and defines the list of participants.
+- Authorization service returns the game_id.
+- An authenticated participant requests a JWT token for that game.
+- The Game Server accepts commands only when the attached JWT is valid and authorizes the user for that specific game.
+
+What is implemented:
+- src/jwt.zig – Small HS256 JWT encoder/validator without external deps.
+- src/auth.zig – In-memory AuthStore to register games and issue tokens to participants.
+- src/server.zig – verifyJwtForMessage helper that validates token and checks game match.
+- Tests covering the above are compiled and run via zig build test.
+
+Quick usage
+```zig
+const std = @import("std");
+const jwt = @import("jwt.zig");
+const auth = @import("auth.zig");
+const server = @import("server.zig");
+
+pub fn demo(a: std.mem.Allocator) !void {
+    // 1) Create a game and register participants in AuthStore
+    var store = auth.AuthStore.init(a);
+    defer store.deinit();
+    const game_id = try store.createGame(&[_][]const u8{"alice", "bob"}, null);
+    defer a.free(game_id);
+
+    // 2) Issue a token for a participant
+    const secret = jwt.defaultSecret(a);
+    defer if (secret.ptr != "dev-secret".*) a.free(secret); // free if from env var
+    const token = try store.issueToken(a, secret, "alice", game_id);
+    defer a.free(token);
+
+    // 3) Verify token on the Game Server against an inbound message
+    const msg = .{
+        .game_id = game_id,
+        .object_id = "ship-42",
+        .operation_id = "move_straight",
+        .args_json = "{}",
+    };
+    const who = try server.verifyJwtForMessage(a, secret, token, msg);
+    defer a.free(who);
+    std.debug.print("Authorized user: {s}\n", .{who});
+}
+```
+
+Configuration
+- JWT_SECRET env var can be set; otherwise a fallback "dev-secret" is used by jwt.defaultSecret().
+- HS256 is used: header {"alg":"HS256","typ":"JWT"}, payload includes fields: sub (user), game_id, optional exp.
+
+Notes
+- AuthStore is an in-memory helper for tests and demos; back it with persistent storage or a standalone service for production.
+- The Game Server endpoint remains generic: it only parses messages and enqueues domain commands. Authorization is orthogonal and can be enforced before interpreting/enqueuing.

@@ -22,4 +22,7 @@ comptime {
     _ = @import("commands/tests_adapter.zig");
     _ = @import("commands/tests_threading.zig");
     _ = @import("commands/tests_endpoint.zig");
+    // Include tests from new modules
+    _ = @import("jwt.zig");
+    _ = @import("auth.zig");
 }
