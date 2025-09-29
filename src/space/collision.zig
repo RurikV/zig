@@ -141,8 +141,8 @@ pub fn buildCellMacro(
     user_ctx: ?*anyopaque,
 ) !core.Command {
     // create commands for each neighbor except self
-    var items = std.ArrayList(core.Command).init(allocator);
-    errdefer items.deinit();
+    var items = std.ArrayListUnmanaged(core.Command){};
+    errdefer items.deinit(allocator);
 
     const Exec = struct {
         fn run(ctx: *PairCheckCtx(T), q: *core.CommandQueue) anyerror!void {
@@ -156,7 +156,7 @@ pub fn buildCellMacro(
         const c = try allocator.create(PairCheckCtx(T));
         c.* = .{ .a = obj, .b = other, .check = check, .record = record, .user_ctx = user_ctx };
         const cmd = Maker.makeOwned(c, .flaky, false, false);
-        try items.append(cmd);
+        try items.append(allocator, cmd);
     }
 
     // Build an owned macro with custom drop that frees inner commands and slice
@@ -186,7 +186,7 @@ pub fn buildCellMacro(
     }.drop;
 
     const mctx = try allocator.create(CollMacroCtx);
-    mctx.* = .{ .allocator = allocator, .items = try items.toOwnedSlice() };
+    mctx.* = .{ .allocator = allocator, .items = try items.toOwnedSlice(allocator) };
     return .{ .ctx = mctx, .call = collThunk, .drop = collDrop, .tag = .flaky, .is_wrapper = false, .is_log = false, .retry_stage = 0 };
 }
 
