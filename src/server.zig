@@ -54,16 +54,40 @@ pub const OpRouter = struct {
     }
 };
 
-// Game runtime: per-game command queue worker
+// Game runtime: per-game command queue worker + ownership registry
 pub const GameRuntime = struct {
+    allocator: Allocator,
     worker: threading.Worker,
+    owners: std.StringHashMapUnmanaged([]u8) = .{},
 
     pub fn init(a: Allocator) GameRuntime {
         const w = threading.Worker.init(a);
-        return .{ .worker = w };
+        return .{ .allocator = a, .worker = w, .owners = .{} };
     }
     pub fn deinit(self: *GameRuntime) void {
         self.worker.deinit();
+        var it = self.owners.iterator();
+        while (it.next()) |kv| {
+            self.allocator.free(kv.key_ptr.*);
+            self.allocator.free(kv.value_ptr.*);
+        }
+        self.owners.deinit(self.allocator);
+    }
+    pub fn setOwner(self: *GameRuntime, object_id: []const u8, user: []const u8) !void {
+        if (self.owners.getPtr(object_id)) |p| {
+            // replace existing owner value
+            self.allocator.free(p.*);
+            p.* = try self.allocator.dupe(u8, user);
+            return;
+        }
+        const k = try self.allocator.dupe(u8, object_id);
+        errdefer self.allocator.free(k);
+        const v = try self.allocator.dupe(u8, user);
+        errdefer self.allocator.free(v);
+        try self.owners.put(self.allocator, k, v);
+    }
+    pub fn getOwner(self: *GameRuntime, object_id: []const u8) ?[]const u8 {
+        return self.owners.get(object_id);
     }
 };
 
@@ -97,6 +121,18 @@ pub const GameRegistry = struct {
         // Do not auto-start the worker in tests; it can be started explicitly by runtime code if needed.
         return p;
     }
+
+    pub fn setOwner(self: *GameRegistry, game_id: []const u8, object_id: []const u8, user: []const u8) !void {
+        const g = try self.ensureGame(game_id);
+        try g.setOwner(object_id, user);
+    }
+
+    pub fn getOwner(self: *GameRegistry, game_id: []const u8, object_id: []const u8) ?[]const u8 {
+        self.mtx.lock();
+        defer self.mtx.unlock();
+        const gp = self.games.getPtr(game_id) orelse return null;
+        return gp.getOwner(object_id);
+    }
 };
 
 // InterpretCommand: builds domain command via IoC and enqueues it into the game queue
@@ -105,11 +141,28 @@ const InterpretCtx = struct {
     registry: *GameRegistry,
     router: *const OpRouter,
     msg: InboundMessage,
+    user: ?[]const u8 = null,
 };
 
 fn execInterpret(ctx: *InterpretCtx, _: *core.CommandQueue) !void {
     // Determine IoC key by operation_id using router to avoid injection
     const key = ctx.router.get(ctx.msg.operation_id) orelse return error.UnknownOperation;
+
+    // If user is provided, switch to per-player scope under this game
+    if (ctx.user) |u| {
+        const scope_name = try std.fmt.allocPrint(ctx.allocator, "game:{s}|user:{s}", .{ ctx.msg.game_id, u });
+        defer ctx.allocator.free(scope_name);
+        var sn = scope_name;
+        var qtmp = core.CommandQueue.init(ctx.allocator);
+        defer qtmp.deinit();
+        const cnew = try IoC.Resolve(ctx.allocator, "Scopes.New", @ptrCast(&sn), null);
+        _ = cnew.call(cnew.ctx, &qtmp) catch {};
+        if (cnew.drop) |d| d(cnew.ctx, ctx.allocator);
+        const ccur = try IoC.Resolve(ctx.allocator, "Scopes.Current", @ptrCast(&sn), null);
+        _ = ccur.call(ccur.ctx, &qtmp) catch {};
+        if (ccur.drop) |d2| d2(ccur.ctx, ctx.allocator);
+    }
+
     // Prepare arguments: pass object_id and args_json as pointers
     var obj_id = ctx.msg.object_id;
     var args_json = ctx.msg.args_json;
@@ -126,6 +179,7 @@ pub const InterpretFactory = struct {
     }
     fn dropThunk(raw: *anyopaque, a: Allocator) void {
         const typed: *InterpretCtx = @ptrCast(@alignCast(raw));
+        if (typed.user) |u| a.free(u);
         free_inbound_message(typed.allocator, typed.msg);
         a.destroy(typed);
     }
@@ -142,6 +196,21 @@ pub const InterpretFactory = struct {
             .operation_id = op,
             .args_json = args,
         } };
+        return .{ .ctx = ctx, .call = thunk, .drop = dropThunk, .tag = .flaky, .is_wrapper = false, .is_log = false, .retry_stage = 0 };
+    }
+    pub fn makeWithUser(a: Allocator, registry: *GameRegistry, router: *const OpRouter, msg: InboundMessage, user: []const u8) core.Command {
+        const ctx = a.create(InterpretCtx) catch @panic("OOM");
+        const gid = a.dupe(u8, msg.game_id) catch @panic("OOM");
+        const oid = a.dupe(u8, msg.object_id) catch @panic("OOM");
+        const op = a.dupe(u8, msg.operation_id) catch @panic("OOM");
+        const args = a.dupe(u8, msg.args_json) catch @panic("OOM");
+        const usr = a.dupe(u8, user) catch @panic("OOM");
+        ctx.* = .{ .allocator = a, .registry = registry, .router = router, .msg = .{
+            .game_id = gid,
+            .object_id = oid,
+            .operation_id = op,
+            .args_json = args,
+        }, .user = usr };
         return .{ .ctx = ctx, .call = thunk, .drop = dropThunk, .tag = .flaky, .is_wrapper = false, .is_log = false, .retry_stage = 0 };
     }
 };
@@ -372,6 +441,13 @@ pub fn verifyJwtForMessage(a: Allocator, secret: []const u8, token: []const u8, 
     return try a.dupe(u8, claims.sub);
 }
 
+// Ownership authorization: if object has an owner, only that user may control it
+pub fn authorizeOwnership(reg: *GameRegistry, msg: InboundMessage, user: []const u8) AuthzError!void {
+    if (reg.getOwner(msg.game_id, msg.object_id)) |o| {
+        if (!std.mem.eql(u8, o, user)) return AuthzError.Forbidden;
+    }
+}
+
 // HTTP endpoint with JWT auth (expects Authorization: Bearer <token>)
 pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter, address: []const u8, secret: []const u8) !void {
     // Minimal HTTP/1.1 loop with Authorization: Bearer <jwt>
@@ -481,7 +557,7 @@ pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter
         };
         defer free_inbound_message(a, parsed);
 
-        const _user = verifyJwtForMessage(a, secret, token, parsed) catch |e| {
+        const user = verifyJwtForMessage(a, secret, token, parsed) catch |e| {
             switch (e) {
                 AuthzError.InvalidToken => {
                     try writer.print("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
@@ -497,9 +573,25 @@ pub fn run_server_auth(a: Allocator, reg: *GameRegistry, router: *const OpRouter
                 },
             }
         };
-        a.free(_user);
 
-        const cmd = InterpretFactory.make(a, reg, router, parsed);
+        // Ownership enforcement: only the owner can control their object
+        authorizeOwnership(reg, parsed, user) catch |e| {
+            switch (e) {
+                AuthzError.Forbidden => {
+                    try writer.print("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
+                    a.free(user);
+                    continue;
+                },
+                else => {
+                    try writer.print("HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{});
+                    a.free(user);
+                    continue;
+                },
+            }
+        };
+
+        const cmd = InterpretFactory.makeWithUser(a, reg, router, parsed, user);
+        a.free(user);
         var q = core.CommandQueue.init(a);
         defer q.deinit();
         _ = cmd.call(cmd.ctx, &q) catch |e| {

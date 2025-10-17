@@ -25,8 +25,10 @@ fn register_test_scope(scope: []const u8) void {
     defer q.deinit();
     const cnew = IoC.Resolve(A, "Scopes.New", @ptrCast(@constCast(&scope)), null) catch unreachable;
     cnew.call(cnew.ctx, &q) catch {};
+    if (cnew.drop) |d| d(cnew.ctx, A);
     const ccur = IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&scope)), null) catch unreachable;
     ccur.call(ccur.ctx, &q) catch {};
+    if (ccur.drop) |d2| d2(ccur.ctx, A);
 }
 
 test "Endpoint: parse_inbound_json parses universal message" {
@@ -187,4 +189,61 @@ test "Server: verifyJwtForMessage forbids token for different game" {
     const tok = try jwt.encodeHS256(A, secret, .{ .sub = "alice", .game_id = "gX", .exp = null });
     defer A.free(tok);
     try std.testing.expectError(server.AuthzError.Forbidden, server.verifyJwtForMessage(A, secret, tok, msg));
+}
+
+// --- Ownership and per-player scope tests ---
+
+test "Server: authorizeOwnership allows owner and forbids others" {
+    var reg = server.GameRegistry.init(A);
+    defer reg.deinit();
+    try reg.setOwner("g11", "ship1", "alice");
+
+    const json = "{\"game_id\":\"g11\",\"object_id\":\"ship1\",\"operation_id\":\"noop\",\"args\":{}}";
+    const msg = try server.parse_inbound_json(A, json);
+    defer server.free_inbound_message(A, msg);
+
+    // Allowed for owner
+    try server.authorizeOwnership(&reg, msg, "alice");
+    // Forbidden for others
+    try std.testing.expectError(server.AuthzError.Forbidden, server.authorizeOwnership(&reg, msg, "bob"));
+}
+
+test "Endpoint: per-player scope selection resolves user-specific operation" {
+    var reg = server.GameRegistry.init(A);
+    defer reg.deinit();
+    var router = server.OpRouter.init();
+    defer router.deinit(A);
+
+    // Define op mapping: route operation_id "user_do" to IoC key "user.op"
+    try router.put(A, "user_do", "user.op");
+
+    // Register factory under Alice's per-player scope for game gs
+    const scope = "game:gs|user:alice";
+    register_test_scope(scope);
+    // Register builder into current (Alice) scope
+    var q = core.CommandQueue.init(A);
+    defer q.deinit();
+    const k: []const u8 = "user.op";
+    const f: *const IoC.FactoryFn = &factory_make_counter;
+    const creg = try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&k)), @ptrCast(@constCast(&f)));
+    try creg.call(creg.ctx, &q);
+    if (creg.drop) |d| d(creg.ctx, A);
+
+    // Prepare message for game gs
+    const json = "{\"game_id\":\"gs\",\"object_id\":\"o\",\"operation_id\":\"user_do\",\"args\":{}}";
+    const msg = try server.parse_inbound_json(A, json);
+    defer server.free_inbound_message(A, msg);
+
+    // Alice can resolve and enqueue
+    const before = (try reg.ensureGame("gs")).worker.pendingCount();
+    const ca = server.InterpretFactory.makeWithUser(A, &reg, &router, msg, "alice");
+    _ = ca.call(ca.ctx, &q) catch unreachable;
+    if (ca.drop) |d| d(ca.ctx, A);
+    const mid = (try reg.ensureGame("gs")).worker.pendingCount();
+    try std.testing.expect(mid == before + 1);
+
+    // Bob fails to resolve in his own scope (no registration)
+    const cb = server.InterpretFactory.makeWithUser(A, &reg, &router, msg, "bob");
+    try std.testing.expectError(error.UnknownKey, cb.call(cb.ctx, &q));
+    if (cb.drop) |d2| d2(cb.ctx, A);
 }
