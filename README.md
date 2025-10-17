@@ -475,6 +475,87 @@ A.destroy(fireable);
 - You can register builders for different interface names (e.g., Weapons.IFireable, Alt.IFireable) and reuse the same Spec; the generated type will call IoC using the chosen IFACE.
 - See src/commands/tests_adapter.zig test "Adapter Generator: FireableAdapter for multiple interface names" for a complete example demonstrating generalization and interface independence.
 
+## Inbound Messaging Endpoint (HTTP)
+
+Goal
+- Provide an endpoint for Agents to send messages to the Game Server.
+- The server routes each message to the correct game by game_id, builds an InterpretCommand (IoC-based), and enqueues it into that game’s command queue.
+
+Universal message format (JSON)
+- game_id: string — identifies the battle/game instance and routes to a per-game queue.
+- object_id: string — identifies the in-game object the operation targets.
+- operation_id: string — an abstract operation name, mapped on the server side to an IoC key. This indirection prevents command injection.
+- args: object — arbitrary operation parameters; the endpoint treats it as opaque.
+
+Example
+```json
+{
+  "game_id": "g1",
+  "object_id": "548",
+  "operation_id": "move",
+  "args": { "speed": 2 }
+}
+```
+
+Files
+- src/server.zig — endpoint/server, message parsing, game registry, InterpretCommand.
+- src/commands/tests_endpoint.zig — tests for parsing and routing.
+
+How InterpretCommand works
+- Input: InboundMessage (game_id, object_id, operation_id, args_json).
+- OpRouter maps external operation_id -> internal IoC key (prevents injection).
+- Calls IoC.Resolve(alloc, ioc_key, &object_id, &args_json) to build a domain command.
+- Enqueues the domain command to the GameRuntime worker for the addressed game.
+
+Security and SOLID
+- operation_id is NOT used directly to resolve IoC entries; only allowed operations from OpRouter are resolved.
+- args are passed as an opaque JSON string; concrete domain commands decide how to parse them. This keeps the endpoint closed for modification when new rules appear.
+
+HTTP endpoint
+- Method/Path: POST /message
+- Body: JSON in the universal format.
+- Responses: 200 OK on success; 400 Bad Request on invalid format or unmapped operation.
+
+Minimal usage example
+```zig
+const std = @import("std");
+const server = @import("src/server.zig");
+const IoC = @import("src/commands/ioc.zig");
+const core = @import("src/commands/core.zig");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const A = gpa.allocator();
+
+    var reg = server.GameRegistry.init(A);
+    defer reg.deinit();
+    var router = server.OpRouter.init();
+    defer router.deinit(A);
+
+    // Map public operation_id to internal IoC key
+    try router.put(A, "move", "domain.move");
+
+    // Register IoC factory for domain.move in current scope
+    const scope: []const u8 = "prod";
+    var q = core.CommandQueue.init(A);
+    try (try IoC.Resolve(A, "Scopes.New", @ptrCast(@constCast(&scope)), null)).call(@ptrCast(0), &q);
+    try (try IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&scope)), null)).call(@ptrCast(0), &q);
+    // TODO: register your factory under key "domain.move" here
+
+    // Run HTTP server on 0.0.0.0:8080
+    try server.run_server(A, &reg, &router, "0.0.0.0");
+}
+```
+
+Test coverage
+- Parses message format.
+- InterpretCommand enqueues a domain command into the correct per-game queue.
+
+Implementation highlights
+- GameRegistry: per-game Worker based on src/commands/threading.zig; efficient synchronized queue, minimal locking.
+- OpRouter: internal hashmap mapping external operation_id to IoC keys (open for extension, closed for modification at the endpoint).
+- parse_inbound_json: uses std.json and keeps args as raw JSON to remain generic.
 
 ## Threaded Command Worker
 
@@ -526,3 +607,148 @@ pub fn demo(alloc: std.mem.Allocator) !void {
 }
 ```
 
+## Architecture: Space Battle Microservices
+
+A proposed microservices architecture for the Space Battle game (services, message flows, endpoints, bottlenecks, OCP strategies, and explanations) is documented here:
+- docs/space-battle-microservices.md
+
+Note: Diagrams are written in Mermaid. Use a viewer or Markdown renderer with Mermaid support to visualize them.
+
+
+
+## Authorization Microservice (JWT)
+
+This repository includes a minimal authorization service and JWT utilities to support the Space Battle microservices flow:
+- Organizer creates a game and defines the list of participants.
+- Authorization service returns the game_id.
+- An authenticated participant requests a JWT token for that game.
+- The Game Server accepts commands only when the attached JWT is valid and authorizes the user for that specific game.
+
+What is implemented:
+- src/jwt.zig – Small HS256 JWT encoder/validator without external deps.
+- src/auth.zig – In-memory AuthStore to register games and issue tokens to participants.
+- src/server.zig – verifyJwtForMessage helper that validates token and checks game match.
+- Tests covering the above are compiled and run via zig build test.
+
+Quick usage
+```zig
+const std = @import("std");
+const jwt = @import("jwt.zig");
+const auth = @import("auth.zig");
+const server = @import("server.zig");
+
+pub fn demo(a: std.mem.Allocator) !void {
+    // 1) Create a game and register participants in AuthStore
+    var store = auth.AuthStore.init(a);
+    defer store.deinit();
+    const game_id = try store.createGame(&[_][]const u8{"alice", "bob"}, null);
+    defer a.free(game_id);
+
+    // 2) Issue a token for a participant
+    const secret = jwt.defaultSecret(a);
+    defer if (secret.ptr != "dev-secret".*) a.free(secret); // free if from env var
+    const token = try store.issueToken(a, secret, "alice", game_id);
+    defer a.free(token);
+
+    // 3) Verify token on the Game Server against an inbound message
+    const msg = .{
+        .game_id = game_id,
+        .object_id = "ship-42",
+        .operation_id = "move_straight",
+        .args_json = "{}",
+    };
+    const who = try server.verifyJwtForMessage(a, secret, token, msg);
+    defer a.free(who);
+    std.debug.print("Authorized user: {s}\n", .{who});
+}
+```
+
+Configuration
+- JWT_SECRET env var can be set; otherwise a fallback "dev-secret" is used by jwt.defaultSecret().
+- HS256 is used: header {"alg":"HS256","typ":"JWT"}, payload includes fields: sub (user), game_id, optional exp.
+
+Notes
+- AuthStore is an in-memory helper for tests and demos; back it with persistent storage or a standalone service for production.
+- The Game Server endpoint remains generic: it only parses messages and enqueues domain commands. Authorization is orthogonal and can be enforced before interpreting/enqueuing.
+
+
+
+## Microservices: Auth Service and Game Server (HTTP)
+
+This repository now includes two small HTTP microservices that communicate using JWT:
+- Auth Service: issues game IDs and JWT tokens to authorized participants.
+- Game Server: accepts commands only when a valid JWT for the target game is provided.
+
+Executables (built by `zig build`):
+- zig-out/bin/auth-service — listens on 0.0.0.0:8081
+- zig-out/bin/game-server — listens on 0.0.0.0:8080
+
+Configuration:
+- JWT secret: environment variable JWT_SECRET (default fallback is "dev-secret").
+
+Run locally (two terminals):
+```bash
+# Terminal 1: start the Auth Service (port 8081)
+export JWT_SECRET=my-very-secret
+zig build && ./zig-out/bin/auth-service
+```
+```bash
+# Terminal 2: start the Game Server (port 8080)
+# Uses the same JWT_SECRET to verify incoming tokens
+export JWT_SECRET=my-very-secret
+zig build && ./zig-out/bin/game-server
+```
+
+Auth Service HTTP API
+- POST /games
+  - Request JSON: {"participants":["alice","bob"]} or {"participants":[...],"game_id":"g-42"}
+  - Response 201: {"game_id":"g-1"}
+- POST /token
+  - Request JSON: {"user":"alice","game_id":"g-1"}
+  - Response 200: {"token":"<jwt>"}
+
+Quick demo with curl
+```bash
+# 1) Create a game and capture its id
+GAME=$(curl -s -X POST http://localhost:8081/games \
+  -H 'Content-Type: application/json' \
+  -d '{"participants":["alice","bob"]}')
+echo "$GAME"  # {"game_id":"g-1"}
+GAME_ID=$(echo "$GAME" | sed -E 's/.*"game_id":"([^"]+)".*/\1/')
+
+# 2) Issue a token for participant alice
+TOK=$(curl -s -X POST http://localhost:8081/token \
+  -H 'Content-Type: application/json' \
+  -d '{"user":"alice","game_id":"'"$GAME_ID"'"}')
+echo "$TOK"   # {"token":"<jwt>"}
+TOKEN=$(echo "$TOK" | sed -E 's/.*"token":"([^"]+)".*/\1/')
+
+# 3) Call the Game Server with Authorization: Bearer <jwt>
+# The demo server maps operation_id "noop" to a safe built-in IoC admin op.
+curl -i -X POST http://localhost:8080/message \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"game_id":"'"$GAME_ID"'","object_id":"obj-1","operation_id":"noop","args":{}}'
+```
+
+Message format accepted by Game Server
+- POST /message
+- JSON body with fields:
+  - game_id: string
+  - object_id: string
+  - operation_id: string (looked up in an internal router to find an IoC key)
+  - args: JSON object (opaque to the endpoint; parsed by the domain command)
+- Authorization header is required: Bearer <jwt>
+
+Extend with real game operations
+- In your runtime, register IoC factories for domain operations and map external operation_id values to your IoC keys using OpRouter.
+- See src/server.zig (OpRouter, GameRegistry, run_server_auth) and src/commands/* for IoC and command queues.
+
+Related files
+- src/auth_service.zig — HTTP Auth Service implementation (POST /games, POST /token)
+- src/main_auth.zig — Auth Service entry point
+- src/main_game.zig — Game Server entry point; minimal router wiring and JWT secret loading
+- src/server.zig — Endpoint, message parsing, game routing, and run_server_auth
+- src/auth.zig — In-memory AuthStore (games and participants)
+- src/jwt.zig — HS256 JWT encode/verify utilities
+- docs/space-battle-microservices.md — Architecture document and diagrams

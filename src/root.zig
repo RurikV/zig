@@ -21,4 +21,9 @@ comptime {
     _ = @import("commands/tests_ioc.zig");
     _ = @import("commands/tests_adapter.zig");
     _ = @import("commands/tests_threading.zig");
+    _ = @import("commands/tests_endpoint.zig");
+    // Include tests from new modules
+    _ = @import("space/tests_collision.zig");
+    _ = @import("jwt.zig");
+    _ = @import("auth.zig");
 }
