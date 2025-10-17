@@ -752,3 +752,83 @@ Related files
 - src/auth.zig — In-memory AuthStore (games and participants)
 - src/jwt.zig — HS256 JWT encode/verify utilities
 - docs/space-battle-microservices.md — Architecture document and diagrams
+
+
+## Command Interpreter via IoC (Game Orders)
+
+This repository includes a generic interpreter for inbound “orders” addressed to game objects. Orders are represented as JSON messages and interpreted via the IoC container, so you can add new operations without changing the endpoint code (Open/Closed Principle).
+
+Message format
+- game_id: string — which game instance this message targets
+- object_id: string — id of the in‑game object to control
+- operation_id: string — public operation name; mapped to an internal IoC key server‑side
+- args: object — arbitrary parameters for the operation
+
+Example
+```json
+{
+  "game_id": "g42",
+  "object_id": "548",
+  "operation_id": "StartMove",
+  "args": { "initialVelocity": 2 }
+}
+```
+
+Where it’s implemented
+- src/server.zig
+  - InboundMessage parsing (parse_inbound_json)
+  - OpRouter: maps operation_id -> IoC key (prevents direct injection)
+  - GameRegistry: routes work to per‑game queues and stores ownership
+  - InterpretFactory: builds a domain command with IoC and enqueues it
+  - run_server_auth: HTTP endpoint with JWT authZ + ownership enforcement + per‑player scope selection
+- src/commands/ioc.zig — IoC container with scopes and admin ops (IoC.Register, Scopes.New/Current)
+
+Start/Stop/Fire without code changes
+- Register domain factories under your own IoC keys (e.g., "ship.move.start", "ship.move.stop", "ship.fire").
+- Map public operation_id strings to those IoC keys via OpRouter at runtime.
+- The endpoint remains unchanged; only configuration/registrations differ.
+
+Minimal wiring sketch (pseudocode)
+```zig
+var reg = server.GameRegistry.init(A);
+var router = server.OpRouter.init();
+// Public -> internal mapping
+try router.put(A, "StartMove", "ship.move.start");
+try router.put(A, "StopMove",  "ship.move.stop");
+try router.put(A, "Fire",      "ship.fire");
+
+// Select a scope (e.g., per game or global) and register factories
+const scope: []const u8 = "game:g42|user:alice"; // per‑player scope example
+var q = core.CommandQueue.init(A);
+try (try IoC.Resolve(A, "Scopes.New", @ptrCast(@constCast(&scope)), null)).call(@ptrCast(0), &q);
+try (try IoC.Resolve(A, "Scopes.Current", @ptrCast(@constCast(&scope)), null)).call(@ptrCast(0), &q);
+
+// Register your factories under internal keys
+const FStart: *const IoC.FactoryFn = &factory_start_move; // (obj_id_ptr, args_json_ptr)
+const FStop:  *const IoC.FactoryFn = &factory_stop_move;
+const FFire:  *const IoC.FactoryFn = &factory_fire;
+try (try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&"ship.move.start")), @ptrCast(@constCast(&FStart)))).call(@ptrCast(0), &q);
+try (try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&"ship.move.stop")),  @ptrCast(@constCast(&FStop)))).call(@ptrCast(0), &q);
+try (try IoC.Resolve(A, "IoC.Register", @ptrCast(@constCast(&"ship.fire")),       @ptrCast(@constCast(&FFire)))).call(@ptrCast(0), &q);
+```
+
+Authorization and protection from cross‑player control
+- JWT verification (verifyJwtForMessage): only tokens issued for the target game_id are accepted. Otherwise 401/403.
+- Ownership enforcement (authorizeOwnership): if an object is owned, only its owner can send commands to it. Ownership is stored per game in GameRegistry. You can set it at runtime via GameRegistry.setOwner(game_id, object_id, user).
+- Per‑player scopes: InterpretFactory.makeWithUser selects scope name "game:{game_id}|user:{sub}" before resolving the operation. This lets you register different implementations for different users (e.g., user‑specific limits or cooldowns) and further hardens isolation between players.
+
+Also
+- The order interpreter is implemented via InterpretFactory + IoC.Resolve.
+- You can handle standard orders: start/stop movement, fire — just register the corresponding factories and routing.
+- No code changes are needed in the endpoint for new orders: operations are added via configuration (router.put + IoC.Register), preserving OCP.
+- You can process not only orders to game objects: IoC keys are unrestricted; register any operations (administrative, infrastructure, etc.).
+- Cross‑player control is prevented: JWT must match the target game_id and ownership is enforced via authorizeOwnership.
+- The code is covered by tests: see src/commands/tests_endpoint.zig and other test files; build with `zig build test`. 
+
+API quick links
+- parse_inbound_json(a, json_text) -> InboundMessage
+- OpRouter.put(a, "PublicName", "IoC.Key")
+- InterpretFactory.makeWithUser(a, &reg, &router, msg, user)
+- verifyJwtForMessage(a, secret, token, msg) -> user
+- authorizeOwnership(&reg, msg, user)
+- GameRegistry.setOwner(game_id, object_id, user)
