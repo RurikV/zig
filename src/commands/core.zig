@@ -9,6 +9,10 @@ pub const CommandTag = enum {
     retry_twice,
     flaky,
     always_fails,
+    // State machine control commands for threading.Worker
+    state_hard_stop,
+    state_move_to,
+    state_run,
 };
 
 pub const CommandFn = fn (ctx: *anyopaque, q: *CommandQueue) anyerror!void;

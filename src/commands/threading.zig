@@ -3,6 +3,94 @@ const core = @import("core.zig");
 
 const Allocator = std.mem.Allocator;
 
+// ------------ State machine (polymorphic via function pointers) ------------
+const State = struct {
+    ctx: *anyopaque,
+    handle: *const fn (ctx: *anyopaque, w: *Worker, cmd: core.Command) ?State,
+};
+
+const NormalStateCtx = struct {};
+const MoveToStateCtx = struct { to: ?*core.CommandQueue };
+
+inline fn dropCmd(alloc: Allocator, cmd: core.Command) void {
+    if (cmd.drop) |d| d(cmd.ctx, alloc);
+}
+
+fn normalHandle(raw: *anyopaque, w: *Worker, cmd: core.Command) ?State {
+    _ = raw; // no data needed
+    switch (cmd.tag) {
+        .state_hard_stop => {
+            // Drop the command and terminate the thread
+            dropCmd(w.allocator, cmd);
+            return null;
+        },
+        .state_move_to => {
+            // Extract target queue pointer from command ctx
+            const to_q: *core.CommandQueue = @ptrCast(@alignCast(cmd.ctx));
+            w.move_to_ctx.to = to_q;
+            dropCmd(w.allocator, cmd);
+            return w.asMoveToState();
+        },
+        .state_run => {
+            // Already in normal; just continue
+            dropCmd(w.allocator, cmd);
+            return w.asNormalState();
+        },
+        else => {
+            // Execute regular command
+            cmd.call(cmd.ctx, &w.queue) catch {};
+            dropCmd(w.allocator, cmd);
+            return w.asNormalState();
+        },
+    }
+}
+
+fn moveToHandle(raw: *anyopaque, w: *Worker, cmd: core.Command) ?State {
+    const sctx: *MoveToStateCtx = @ptrCast(@alignCast(raw));
+    switch (cmd.tag) {
+        .state_hard_stop => {
+            dropCmd(w.allocator, cmd);
+            return null;
+        },
+        .state_run => {
+            dropCmd(w.allocator, cmd);
+            return w.asNormalState();
+        },
+        .state_move_to => {
+            // Update target (generic: use worker's shared move_to_ctx)
+            const to_q: *core.CommandQueue = @ptrCast(@alignCast(cmd.ctx));
+            w.move_to_ctx.to = to_q;
+            dropCmd(w.allocator, cmd);
+            return w.asMoveToState();
+        },
+        else => {
+            // Redirect to external queue (best-effort)
+            if (sctx.to) |to_q| {
+                to_q.pushBack(cmd) catch {
+                    // If forwarding fails, drop to avoid leaks
+                    dropCmd(w.allocator, cmd);
+                };
+            } else {
+                // No target set; drop silently
+                dropCmd(w.allocator, cmd);
+            }
+            return w.asMoveToState();
+        },
+    }
+}
+
+// Helper constructors for states (no heap allocations)
+fn makeState(ctx: *anyopaque, handler: *const fn (*anyopaque, *Worker, core.Command) ?State) State {
+    return .{ .ctx = ctx, .handle = handler };
+}
+
+fn makeNormalState(ctx: *NormalStateCtx) State {
+    return makeState(ctx, normalHandle);
+}
+fn makeMoveToState(ctx: *MoveToStateCtx) State {
+    return makeState(ctx, moveToHandle);
+}
+
 pub const Worker = struct {
     allocator: Allocator,
 
@@ -17,6 +105,17 @@ pub const Worker = struct {
     running: bool = false,
     req_hard_stop: bool = false,
     req_soft_stop: bool = false,
+
+    // State machine contexts (stored to avoid heap allocations)
+    normal_ctx: NormalStateCtx = .{},
+    move_to_ctx: MoveToStateCtx = .{ .to = null },
+
+    inline fn asNormalState(self: *Worker) State {
+        return makeNormalState(&self.normal_ctx);
+    }
+    inline fn asMoveToState(self: *Worker) State {
+        return makeMoveToState(&self.move_to_ctx);
+    }
 
     pub fn init(a: Allocator) Worker {
         return .{ .allocator = a, .queue = core.CommandQueue.init(a) };
@@ -37,8 +136,10 @@ pub const Worker = struct {
         self.started = true;
         self.running = true;
         self.cv.broadcast();
+        // Start in Normal state
+        var state = self.asNormalState();
         while (true) {
-            // Break immediately on hard stop request
+            // Break immediately on hard stop request (external)
             if (self.req_hard_stop) break;
             // Wait for work if empty
             if (self.queue.isEmpty()) {
@@ -48,9 +149,15 @@ pub const Worker = struct {
             }
             // Get work
             const cmd = self.queue.popFront().?;
-            // Execute under lock; allow commands to enqueue more work safely
-            cmd.call(cmd.ctx, &self.queue) catch {};
-            if (cmd.drop) |d| d(cmd.ctx, self.allocator);
+            // Dispatch via state handler
+            const next = state.handle(state.ctx, self, cmd);
+            if (next) |s| {
+                state = s;
+                continue;
+            } else {
+                // state requested termination
+                break;
+            }
         }
         self.running = false;
         self.cv.broadcast();
@@ -87,6 +194,12 @@ pub const Worker = struct {
             return;
         };
         self.cv.broadcast();
+        self.mtx.unlock();
+    }
+
+    pub fn waitStopped(self: *Worker) void {
+        self.mtx.lock();
+        while (self.running) self.cv.wait(&self.mtx);
         self.mtx.unlock();
     }
 
@@ -157,5 +270,48 @@ pub const ThreadingFactory = struct {
     pub fn SoftStopCommand(ctx: *SoftStopCtx) core.Command {
         const Maker = core.CommandFactory(SoftStopCtx, execSoftStop);
         return Maker.make(ctx, .flaky);
+    }
+};
+
+// ---------------- State-switch Commands (processed by Worker's state machine) ----------------
+// No-op executor generator to avoid duplicating identical exec functions for control commands
+pub fn NoopExec(comptime T: type) fn (*T, *core.CommandQueue) anyerror!void {
+    return struct {
+        pub fn f(_: *T, _: *core.CommandQueue) anyerror!void {
+            return;
+        }
+    }.f;
+}
+
+const StatelessCtx = struct {};
+var g_stateless_ctx: StatelessCtx = .{};
+
+pub const StateFactory = struct {
+    inline fn assertStateTag(tag: core.CommandTag) void {
+        // Ensure only state-control tags are used with this factory
+        std.debug.assert(tag == .state_hard_stop or tag == .state_move_to or tag == .state_run);
+    }
+
+    pub fn makeStateless(tag: core.CommandTag) core.Command {
+        assertStateTag(tag);
+        const Maker = core.CommandFactory(StatelessCtx, NoopExec(StatelessCtx));
+        return Maker.make(&g_stateless_ctx, tag);
+    }
+
+    pub fn makeWithCtx(comptime T: type, ctx: *T, tag: core.CommandTag) core.Command {
+        assertStateTag(tag);
+        const Maker = core.CommandFactory(T, NoopExec(T));
+        return Maker.make(ctx, tag);
+    }
+
+    // Backward-compatible convenience wrappers
+    pub fn HardStop() core.Command {
+        return makeStateless(.state_hard_stop);
+    }
+    pub fn MoveTo(to: *core.CommandQueue) core.Command {
+        return makeWithCtx(core.CommandQueue, to, .state_move_to);
+    }
+    pub fn Run() core.Command {
+        return makeStateless(.state_run);
     }
 };
